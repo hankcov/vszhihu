@@ -1023,7 +1023,7 @@ window.VSZhihuUI = {
 
                 html += `<div class="vsc-comment-card" id="vsc-cmt-${item.id}">`;
                 html += `  <div class="vsc-comment-header">`;
-                html += `    <span>┌─ @${author} <span style="color: var(--vsc-fg-muted); font-size: 11px;">(${time})</span></span>`;
+                html += `    <span>┌─ @${author} <span style="color: var(--vsc-fg-muted); font-size: 12px;">(${time})</span></span>`;
                 html += `    <span style="color: var(--vsc-syn-number);">▲ ${likes} 赞</span>`;
                 html += `  </div>`;
                 html += `  <div style="padding-left: 12px; color: var(--vsc-fg);">${content}</div>`;
@@ -1246,7 +1246,7 @@ window.VSZhihuUI = {
 
             html += `<div class="vsc-comment-card" id="vsc-cmt-${item.id}">`;
             html += `  <div class="vsc-comment-header">`;
-            html += `    <span>┌─ @${author} <span style="color: var(--vsc-fg-muted); font-size: 11px;">(${time})</span></span>`;
+            html += `    <span>┌─ @${author} <span style="color: var(--vsc-fg-muted); font-size: 12px;">(${time})</span></span>`;
             html += `    <span style="color: var(--vsc-syn-number);">▲ ${likes} 赞</span>`;
             html += `  </div>`;
             html += `  <div style="padding-left: 12px; color: var(--vsc-fg);">${content}</div>`;

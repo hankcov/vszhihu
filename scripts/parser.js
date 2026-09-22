@@ -329,33 +329,38 @@ window.VSZhihuParser = {
 
   cleanContentText: function(target) {
     if (!target) return '';
-    
-    if (typeof target === 'string') {
-      return target
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-        .replace(/\.css-[^{]+\{[^}]+\}/g, '')
-        .replace(/\{[^{}]*dynamic-range-limit[^{}]*\}/gi, '')
-        .replace(/<[^>]+>/g, '')
-        .replace(/\n\s*\n/g, '\n')
-        .trim();
+
+    let html = target;
+    if (typeof target !== 'string') {
+      try {
+        const clone = target.cloneNode(true);
+        clone.querySelectorAll('style, script, svg, [data-uncomfortable], link, meta').forEach(node => node.remove());
+        html = clone.innerHTML;
+      } catch(e) {
+        return (target.innerText || target.textContent || '').trim();
+      }
     }
 
     try {
-      const clone = target.cloneNode(true);
-      clone.querySelectorAll('style, script, svg, [data-uncomfortable], link, meta').forEach(node => node.remove());
-      
-      let text = (clone.innerText || clone.textContent || '').trim();
-      text = text
+      html = String(html)
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
         .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+        .replace(/<svg[\s\S]*?<\/svg>/gi, '')
         .replace(/\.css-[^{]+\{[^}]+\}/g, '')
         .replace(/\{[^{}]*dynamic-range-limit[^{}]*\}/gi, '')
-        .replace(/\n\s*\n/g, '\n')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|li|h[1-6]|blockquote|figcaption|pre|figure|tr|section|article|ul|ol)>/gi, '\n\n')
+        .replace(/<[^>]+>/g, '');
+
+      const div = document.createElement('div');
+      div.innerHTML = html;
+      return (div.textContent || '')
+        .replace(/ /g, ' ')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
         .trim();
-      return text;
     } catch(e) {
-      return (target.innerText || target.textContent || '').trim();
+      return String(html).replace(/<[^>]+>/g, '').replace(/\n{3,}/g, '\n\n').trim();
     }
   },
 
@@ -797,11 +802,21 @@ window.VSZhihuParser = {
       code += `  <span class="syn-var">getContent</span>: <span class="syn-kw">function</span>(): <span class="syn-type">string</span> {\n`;
       code += `    <span class="syn-ctrl">return</span> \`\n`;
 
-      // Content paragraph formatting
-      const lines = ans.contentText.split('\n');
+      // Content paragraph formatting (keep one blank line between paragraphs)
+      const lines = String(ans.contentText || '').split(/\r?\n/);
+      let blankPending = false;
+      let emittedLine = false;
       lines.forEach(line => {
-        if (line.trim()) {
-          code += `      ${escapeHtml(line)}\n`;
+        const trimmed = line.trim();
+        if (trimmed) {
+          if (emittedLine && blankPending) {
+            code += `\n`;
+          }
+          code += `      ${escapeHtml(trimmed)}\n`;
+          blankPending = false;
+          emittedLine = true;
+        } else if (emittedLine) {
+          blankPending = true;
         }
       });
 

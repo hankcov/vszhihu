@@ -3,4 +3,5 @@
 generate-key.js
 release.sh
 publish.sh
+tmp/
 

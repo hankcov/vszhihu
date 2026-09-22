@@ -9,7 +9,7 @@ chrome.runtime.onInstalled.addListener(() => {
       enabled: true,
       theme: 'dark-plus', // dark-plus (free default)
       codeViewMode: 'code',
-      fontSize: 13,
+      fontSize: 15,
       bossKeyShortcut: 'Alt+V',
       customBossCode: '',
       sponsorLink: 'https://ifdian.net/a/7675a',
