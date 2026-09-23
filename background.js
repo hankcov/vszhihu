@@ -52,13 +52,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       headers: {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       },
-      credentials: 'include'
+      credentials: 'include',
+      redirect: 'follow'
     })
-      .then(res => {
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return res.text();
+      .then(async res => {
+        const data = await res.text();
+        return {
+          ok: res.ok,
+          status: res.status,
+          finalUrl: res.url || request.url,
+          length: data.length,
+          data
+        };
       })
-      .then(data => sendResponse({ success: true, data: data }))
+      .then(info => {
+        if (!info.ok) {
+          sendResponse({ success: false, error: 'HTTP ' + info.status, finalUrl: info.finalUrl, length: info.length });
+          return;
+        }
+        sendResponse({ success: true, data: info.data, finalUrl: info.finalUrl, length: info.length });
+      })
       .catch(err => sendResponse({ success: false, error: err.toString() }));
     return true; // Keep channel open for async response
   }

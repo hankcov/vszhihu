@@ -15,6 +15,9 @@
 
   console.log('[VSCode-Zhihu] Content script initialized on:', window.location.href);
 
+  const perf = () => window.VSZhihuPerf;
+  const __settingsMark = perf() ? perf().mark('content.getSettings') : null;
+
   let currentSettings = { enabled: true, theme: localStorage.getItem('vsc_theme') || 'dark-plus', codeViewMode: 'code' };
   let lastPathname = window.location.pathname;
 
@@ -39,6 +42,7 @@
   // Retrieve user settings from background/storage
   try {
     chrome.runtime.sendMessage({ action: 'getSettings' }, (settings) => {
+      if (perf() && __settingsMark) perf().end(__settingsMark, 'enabled=' + (settings && settings.enabled));
       if (!chrome.runtime.lastError && settings && settings.enabled !== undefined) {
         currentSettings = Object.assign(currentSettings, settings);
       }
@@ -75,7 +79,8 @@
     }
   });
 
-  function parseCurrentPage() {
+  function parseCurrentPage(caller) {
+    const __mark = perf() ? perf().mark('content.parseCurrentPage') : null;
     if (!window.VSZhihuParser) {
       return { type: 'general', title: document.title, answers: [], feedList: [] };
     }
@@ -92,11 +97,16 @@
       data = window.VSZhihuParser.parseFeedPage();
     }
 
+    if (perf() && __mark) {
+      perf().end(__mark, 'type=' + pageType + ' answers=' + (data.answers ? data.answers.length : 0) +
+        ' feed=' + (data.feedList ? data.feedList.length : 0) + (caller ? ' by=' + caller : ''));
+    }
     return data;
   }
 
   function startVSCodeMode(settings) {
-    let data = parseCurrentPage();
+    const __mark = perf() ? perf().mark('content.startVSCodeMode') : null;
+    let data = parseCurrentPage('start');
 
     // Initialize UI engine
     if (window.VSZhihuUI) {
@@ -105,12 +115,24 @@
 
     // Reveal the VS Code overlay (hidden since document_start to prevent flash)
     document.documentElement.classList.add('vsc-zhihu-ready');
+    if (perf() && __mark) perf().end(__mark, 'type=' + data.type);
+
+    // Cheap DOM signature for observer short-circuit (pathname + card count).
+    function computeDomSig() {
+      const cards = document.querySelectorAll(
+        '.List-item, .AnswerCard, .AnswerItem, .ContentItem, .Post-Main, .ArticleItem'
+      ).length;
+      return window.location.pathname + '#' + cards;
+    }
+    let lastDomSig = computeDomSig();
 
     // Dynamic retry polling for delayed React hydration (up to 30 seconds)
     let retryCount = 0;
+    const __retryMark = perf() ? perf().mark('content.retryInterval') : null;
     const retryInterval = setInterval(() => {
       retryCount++;
-      const refreshedData = parseCurrentPage();
+      const __tickMark = perf() ? perf().mark('content.retryTick') : null;
+      const refreshedData = parseCurrentPage('retry');
       const hasContent = (refreshedData.feedList && refreshedData.feedList.length > 0) || (refreshedData.answers && refreshedData.answers.length > 0);
 
       if (hasContent) {
@@ -122,52 +144,146 @@
             mainTab.formattedCode = window.VSZhihuParser ? window.VSZhihuParser.formatAsTypeScript(refreshedData) : '';
             mainTab.title = window.VSZhihuParser ? window.VSZhihuParser.getFileName(refreshedData, mainTab.url) : mainTab.title;
           }
-          window.VSZhihuUI.createAppRoot();
+          window.VSZhihuUI.createAppRoot('retry-found-content');
         }
+        lastDomSig = computeDomSig();
         clearInterval(retryInterval);
+        if (perf() && __retryMark) perf().end(__retryMark, 'foundAtTick=' + retryCount);
       } else if (retryCount >= 100) {
         clearInterval(retryInterval);
+        if (perf() && __retryMark) perf().end(__retryMark, 'timeout atTick=' + retryCount);
+      }
+      if (perf() && __tickMark && retryCount % 10 === 0) {
+        perf().end(__tickMark, 'tick=' + retryCount);
       }
     }, 300);
 
+    function hasRenderableContent(parsed) {
+      if (!parsed) return false;
+      if (parsed.answers && parsed.answers.length > 0) return true;
+      if (parsed.feedList && parsed.feedList.length > 0) return true;
+      return false;
+    }
+
+    function applyParsedData(parsed, reason) {
+      if (!window.VSZhihuUI || !parsed) return;
+
+      // C: never let an empty parse wipe existing content on the same path.
+      const isPathChange = reason === 'spaPathChange' || reason === 'pathChange' || reason === 'pathChangePartial';
+      if (!isPathChange && !hasRenderableContent(parsed) && hasRenderableContent(window.VSZhihuUI.parsedData)) {
+        if (perf()) perf().log('applyParsedData skip-empty reason=' + (reason || 'apply'));
+        return;
+      }
+
+      const __mark = perf() ? perf().mark('content.applyParsedData') : null;
+      window.VSZhihuUI.parsedData = parsed;
+      const mainTab = window.VSZhihuUI.tabs?.find(t => t.id === 'tab-main');
+      if (mainTab) {
+        mainTab.parsedData = parsed;
+        mainTab.formattedCode = window.VSZhihuParser ? window.VSZhihuParser.formatAsTypeScript(parsed) : '';
+        mainTab.title = window.VSZhihuParser ? window.VSZhihuParser.getFileName(parsed, mainTab.url) || mainTab.title : mainTab.title;
+      }
+      window.VSZhihuUI.createAppRoot(reason || 'applyParsedData');
+      lastDomSig = computeDomSig();
+      if (perf() && __mark) perf().end(__mark, 'reason=' + (reason || 'apply') + ' answers=' + (parsed.answers ? parsed.answers.length : 0));
+    }
+
+    function retryParseAfterPathChange(pathAtChange) {
+      let tries = 0;
+      const __mark = perf() ? perf().mark('content.retryParseAfterPathChange') : null;
+      const timer = setInterval(() => {
+        if (window.location.pathname !== pathAtChange) {
+          clearInterval(timer);
+          if (perf() && __mark) perf().end(__mark, 'aborted path changed atTry=' + tries);
+          return;
+        }
+        tries++;
+        const parsed = parseCurrentPage('pathChangeRetry');
+        if (hasRenderableContent(parsed) || tries >= 40) {
+          applyParsedData(parsed, 'pathChange');
+          clearInterval(timer);
+          if (perf() && __mark) perf().end(__mark, 'done atTry=' + tries + ' content=' + hasRenderableContent(parsed));
+          return;
+        }
+        if (tries % 5 === 0) {
+          applyParsedData(parsed, 'pathChangePartial');
+        }
+      }, 300);
+    }
+
+    // B: ignore mutations that only touch our own UI shells.
+    function isOurUiNode(node) {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.id === 'vsc-app-root' || node.id === 'vsc-boss-screen') return true;
+      if (node.closest && node.closest('#vsc-app-root, #vsc-boss-screen')) return true;
+      return false;
+    }
+
+    function isRelevantMutation(m) {
+      const t = m.target;
+      if (t && t.nodeType === 1 && isOurUiNode(t)) return false;
+      if (m.type === 'childList') {
+        const changed = [...m.addedNodes, ...m.removedNodes];
+        if (changed.length && changed.every(n =>
+          (n.nodeType === 1 && (n.id === 'vsc-app-root' || n.id === 'vsc-boss-screen')) ||
+          (n.nodeType !== 1 && t && t.nodeType === 1 && isOurUiNode(t))
+        )) {
+          return false;
+        }
+      }
+      return true;
+    }
+
     // Observe DOM updates & scroll lazy loading
     let updateTimer = null;
-    const observer = new MutationObserver(() => {
+    let observerFireCount = 0;
+    let observerParseCount = 0;
+    let observerSkipCount = 0;
+    const observer = new MutationObserver((muts) => {
+      if (!muts.some(isRelevantMutation)) return;
+      observerFireCount++;
       clearTimeout(updateTimer);
       updateTimer = setTimeout(() => {
         if (!window.VSZhihuUI) return;
+        observerParseCount++;
+        const __mark = perf() ? perf().mark('content.observerParse') : null;
 
         // Detect SPA path change
         if (window.location.pathname !== lastPathname) {
           lastPathname = window.location.pathname;
-          data = parseCurrentPage();
-          if (window.VSZhihuUI) {
-            window.VSZhihuUI.parsedData = data;
-            const mainTab = window.VSZhihuUI.tabs?.find(t => t.id === 'tab-main');
-            if (mainTab) {
-              mainTab.parsedData = data;
-              mainTab.formattedCode = window.VSZhihuParser ? window.VSZhihuParser.formatAsTypeScript(data) : '';
-              mainTab.title = window.VSZhihuParser ? window.VSZhihuParser.getFileName(data, mainTab.url) : mainTab.title;
-            }
-            window.VSZhihuUI.createAppRoot();
+          data = parseCurrentPage('spaPathChange');
+          applyParsedData(data, 'spaPathChange');
+          retryParseAfterPathChange(lastPathname);
+          lastDomSig = computeDomSig();
+          if (perf() && __mark) perf().end(__mark, 'spaNavigate path=' + lastPathname);
+          return;
+        }
+
+        // B: signature unchanged → skip full parse.
+        const sig = computeDomSig();
+        if (sig === lastDomSig) {
+          observerSkipCount++;
+          if (perf() && __mark) {
+            perf().end(__mark, 'skip-sig fireN=' + observerFireCount + ' parseN=' + observerParseCount + ' skipN=' + observerSkipCount);
           }
           return;
         }
 
         const currentParsed = window.VSZhihuUI?.parsedData || {};
-        const newData = parseCurrentPage();
+        const newData = parseCurrentPage('observer');
         const itemCountChanged = (newData.answers?.length !== currentParsed.answers?.length) ||
                                  (newData.feedList?.length !== currentParsed.feedList?.length);
 
         if (newData && itemCountChanged && window.VSZhihuUI) {
-          window.VSZhihuUI.parsedData = newData;
-          const mainTab = window.VSZhihuUI.tabs?.find(t => t.id === 'tab-main');
-          if (mainTab) {
-            mainTab.parsedData = newData;
-            mainTab.formattedCode = window.VSZhihuParser ? window.VSZhihuParser.formatAsTypeScript(newData) : '';
-            mainTab.title = window.VSZhihuParser ? window.VSZhihuParser.getFileName(newData, mainTab.url) : mainTab.title;
-          }
-          window.VSZhihuUI.createAppRoot();
+          applyParsedData(newData, 'observerCountChange');
+        } else {
+          lastDomSig = sig;
+        }
+        if (perf() && __mark) {
+          perf().end(__mark, 'changed=' + itemCountChanged +
+            ' fireN=' + observerFireCount + ' parseN=' + observerParseCount + ' skipN=' + observerSkipCount +
+            ' answers=' + (newData.answers ? newData.answers.length : 0) +
+            ' feed=' + (newData.feedList ? newData.feedList.length : 0));
         }
       }, 250);
     });

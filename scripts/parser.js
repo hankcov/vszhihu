@@ -3,7 +3,61 @@
  * Extracts structured data from Zhihu DOM and formats it as syntax-highlighted TS / Markdown code.
  */
 
+// Performance logging helper. Filter Console with: perf
+window.VSZhihuPerf = (function() {
+  const stats = Object.create(null);
+  const now = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  return {
+    mark: function(label) {
+      return { label: label, t0: now() };
+    },
+    end: function(mark, detail) {
+      if (!mark) return 0;
+      const ms = now() - mark.t0;
+      const key = mark.label;
+      if (!stats[key]) stats[key] = { count: 0, total: 0, max: 0 };
+      stats[key].count++;
+      stats[key].total += ms;
+      if (ms > stats[key].max) stats[key].max = ms;
+      const s = stats[key];
+      const avg = s.total / s.count;
+      const d = detail ? ' | ' + detail : '';
+      console.log('[VSCode-Zhihu][perf] ' + key + ' took=' + ms.toFixed(1) + 'ms' + d +
+        ' | n=' + s.count + ' avg=' + avg.toFixed(1) + ' max=' + s.max.toFixed(1));
+      return ms;
+    },
+    log: function(msg) {
+      console.log('[VSCode-Zhihu][perf] ' + msg);
+    },
+    snapshot: function() {
+      const out = {};
+      Object.keys(stats).forEach(k => {
+        const s = stats[k];
+        out[k] = { count: s.count, total: +s.total.toFixed(1), avg: +(s.total / s.count).toFixed(1), max: +s.max.toFixed(1) };
+      });
+      return out;
+    }
+  };
+})();
+
 window.VSZhihuParser = {
+  /**
+   * Format answer timestamp (seconds or ms) → local date string.
+   */
+  formatAnswerTime: function(ts) {
+    if (ts === undefined || ts === null || ts === '') return '';
+    let n = typeof ts === 'string' ? parseInt(ts, 10) : Number(ts);
+    if (!isFinite(n) || n <= 0) return '';
+    if (n < 1e12) n = n * 1000;
+    const d = new Date(n);
+    if (isNaN(d.getTime())) return '';
+    try {
+      return d.toLocaleString();
+    } catch (e) {
+      return d.toISOString().slice(0, 19).replace('T', ' ');
+    }
+  },
+
   /**
    * Detect current page type
    */
@@ -40,6 +94,7 @@ window.VSZhihuParser = {
    * Parse Hot Rank Page (`/hot`)
    */
   parseHotPage: function(doc = (typeof document !== 'undefined' ? document : null)) {
+    const __perf = window.VSZhihuPerf && window.VSZhihuPerf.mark('parser.parseHotPage');
     const targetDoc = doc || document;
     const items = targetDoc.querySelectorAll('.HotList-list section, section.HotItem, .HotItem, [aria-label*="热榜"] section, .Card .HotItem-content');
     const feedList = [];
@@ -109,6 +164,9 @@ window.VSZhihuParser = {
       });
     }
 
+    if (window.VSZhihuPerf && __perf) {
+      window.VSZhihuPerf.end(__perf, 'items=' + items.length + ' feed=' + feedList.length);
+    }
     return {
       type: 'hot',
       title: '知乎全网热榜 (Hot Rank)',
@@ -182,6 +240,7 @@ window.VSZhihuParser = {
    * Parse Article Page (`/p/123456` or `/zhuanlan/`)
    */
   parseArticlePage: function(doc = (typeof document !== 'undefined' ? document : null), url = '') {
+    const __perf = window.VSZhihuPerf && window.VSZhihuPerf.mark('parser.parseArticlePage');
     const targetDoc = doc || document;
     const titleEl = targetDoc.querySelector('h1.Post-Title, .Post-Header h1, .ArticleItem-title, h1');
     let title = titleEl ? titleEl.innerText.trim() : (targetDoc.title ? targetDoc.title.replace('- 知乎', '').trim() : '知乎文章');
@@ -274,6 +333,9 @@ window.VSZhihuParser = {
       commentCount = String(comments.length);
     }
 
+    if (window.VSZhihuPerf && __perf) {
+      window.VSZhihuPerf.end(__perf, 'titleLen=' + String(title || '').length + ' bodyLen=' + String(contentText || '').length + ' comments=' + comments.length);
+    }
     return {
       type: 'article',
       title: title,
@@ -329,20 +391,37 @@ window.VSZhihuParser = {
 
   cleanContentText: function(target) {
     if (!target) return '';
-
-    let html = target;
-    if (typeof target !== 'string') {
-      try {
-        const clone = target.cloneNode(true);
-        clone.querySelectorAll('style, script, svg, [data-uncomfortable], link, meta').forEach(node => node.remove());
-        html = clone.innerHTML;
-      } catch(e) {
-        return (target.innerText || target.textContent || '').trim();
+    const __perf = window.VSZhihuPerf && window.VSZhihuPerf.mark('parser.cleanContentText');
+    let __result = '';
+    try {
+      if (typeof target !== 'string') {
+        // Always convert via HTML so block tags become paragraph breaks.
+        // (Detached innerText ≈ textContent and drops newlines between <p> tags.)
+        try {
+          const clone = target.cloneNode(true);
+          clone.querySelectorAll('style, script, svg, [data-uncomfortable], link, meta').forEach(node => node.remove());
+          __result = this._htmlToContentText(clone.innerHTML);
+        } catch(e) {
+          __result = (target.innerText || target.textContent || '').trim();
+        }
+      } else {
+        __result = this._htmlToContentText(target);
+      }
+      return __result;
+    } finally {
+      // Sample logs: every call for slow ones; cap noise via detail only when notable
+      if (window.VSZhihuPerf && __perf) {
+        const ms = window.VSZhihuPerf.end(__perf, 'inLen=' + (typeof target === 'string' ? target.length : (target.innerHTML ? target.innerHTML.length : 0)) + ' outLen=' + __result.length);
+        // Suppress ultra-fast spam in stats still recorded; no extra branch needed
+        void ms;
       }
     }
+  },
 
+  _htmlToContentText: function(html) {
+    if (!html) return '';
     try {
-      html = String(html)
+      let raw = String(html)
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
         .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
         .replace(/<svg[\s\S]*?<\/svg>/gi, '')
@@ -352,9 +431,17 @@ window.VSZhihuParser = {
         .replace(/<\/(p|div|li|h[1-6]|blockquote|figcaption|pre|figure|tr|section|article|ul|ol)>/gi, '\n\n')
         .replace(/<[^>]+>/g, '');
 
-      const div = document.createElement('div');
-      div.innerHTML = html;
-      return (div.textContent || '')
+      // Decode entities without assigning innerHTML (avoids Trusted Types / CSP issues).
+      raw = raw
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#0?39;/g, "'")
+        .replace(/&#x27;/gi, "'")
+        .replace(/&amp;/gi, '&');
+
+      return raw
         .replace(/ /g, ' ')
         .replace(/[ \t]+\n/g, '\n')
         .replace(/\n{3,}/g, '\n\n')
@@ -372,13 +459,27 @@ window.VSZhihuParser = {
       .replace(/\{[^}]*\}/g, '')
       .replace(/\s+/g, ' ')
       .trim();
-    return clean || '知乎用户';
+
+    // Prefer first meaningful line/segment (AuthorInfo blocks may include buttons).
+    if (clean.includes('\n')) {
+      clean = clean.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+    }
+    // Strip common non-name noise tokens.
+    clean = clean
+      .replace(/\b(写回答|关注|取关|赞同|评论|分享|举报|编辑|添加评论|不再显示)\b/g, ' ')
+      .replace(/^[·・.\-–—|/\\]+|[·・.\-–—|/\\]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!clean || /^[0-9]+$/.test(clean)) return '知乎用户';
+    return clean;
   },
 
   /**
    * Parse Question Page (`/question/123456`)
    */
   parseQuestionPage: function(doc = (typeof document !== 'undefined' ? document : null), url = '') {
+    const __perf = window.VSZhihuPerf && window.VSZhihuPerf.mark('parser.parseQuestionPage');
     const targetDoc = doc || document;
     const titleEl = targetDoc.querySelector('h1.QuestionHeader-title, .QuestionHeader-title, h1');
     let title = titleEl ? (titleEl.innerText || titleEl.textContent || '').trim() : (targetDoc.title ? targetDoc.title.replace('- 知乎', '').trim() : '知乎问题');
@@ -416,6 +517,18 @@ window.VSZhihuParser = {
       let voteCount = '0';
       if (voteEl) {
         voteCount = voteEl.innerText.replace(/▲|\n|赞同/g, '').trim() || '0';
+      }
+
+      let createdAt = '';
+      const timeEl = card.querySelector('.ContentItem-time, .AnswerItem-time, time, [class*="ContentItem-time"]');
+      if (timeEl) {
+        createdAt = (timeEl.innerText || timeEl.textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      if (!createdAt && card.dataset) {
+        createdAt = card.dataset.created || card.dataset.createdTime || '';
+        if (createdAt && /^\d+$/.test(createdAt)) {
+          createdAt = this.formatAnswerTime(createdAt);
+        }
       }
 
       let commentCount = card.dataset.commentCount || '0';
@@ -505,6 +618,7 @@ window.VSZhihuParser = {
         commentCount: commentCount,
         contentHtml: contentHtml,
         contentText: contentText,
+        createdAt: createdAt,
         comments: comments
       });
     });
@@ -538,6 +652,7 @@ window.VSZhihuParser = {
                 voteCount: String(ansObj.voteupCount || 0),
                 commentCount: String(ansObj.commentCount || 0),
                 contentText: cText,
+                createdAt: this.formatAnswerTime(ansObj.createdTime || ansObj.created_time || ansObj.updatedTime),
                 comments: []
               });
             }
@@ -568,6 +683,9 @@ window.VSZhihuParser = {
       viewAllHref = `/question/${questionId}`;
     }
 
+    if (window.VSZhihuPerf && __perf) {
+      window.VSZhihuPerf.end(__perf, 'rawCards=' + rawCards.length + ' answers=' + answers.length);
+    }
     return {
       type: 'question',
       title: title,
@@ -615,9 +733,19 @@ window.VSZhihuParser = {
       if (href.startsWith('//')) href = 'https:' + href;
       else if (href.startsWith('/')) href = 'https://www.zhihu.com' + href;
 
-      const authorEl = item.querySelector('.UserLink-link, .AuthorInfo-name, [itemprop="name"], .AuthorInfo');
-      const rawAuthor = authorEl ? (authorEl.innerText || authorEl.textContent || '') : '';
-      const author = authorEl ? this.cleanAuthorName(rawAuthor) : '知乎推荐';
+      // Prefer specific author nodes first — bare .AuthorInfo is an ancestor and
+      // would win document-order querySelector, often yielding empty/noise text.
+      const authorEl =
+        item.querySelector('.AuthorInfo-name a.UserLink-link, .AuthorInfo-name .UserLink-link, .AuthorInfo-name a[href*="/people/"]') ||
+        item.querySelector('a.UserLink-link[href*="/people/"], a.UserLink-link') ||
+        item.querySelector('.AuthorInfo-name, [itemprop="name"]') ||
+        item.querySelector('a[href*="/people/"]') ||
+        item.querySelector('.ContentItem-meta a[href^="/people/"], .ContentItem-meta [class*="Author"]') ||
+        null;
+      const rawAuthor = authorEl ? (authorEl.getAttribute('content') || authorEl.innerText || authorEl.textContent || '') : '';
+      const author = rawAuthor
+        ? this.cleanAuthorName(rawAuthor)
+        : '知乎推荐';
 
       const excerptEl = item.querySelector('.RichText, .ContentItem-excerpt, .HotItem-excerpt, .CopyrightRichText-richText, .RichContent-inner');
       const excerpt = excerptEl ? (excerptEl.innerText || excerptEl.textContent || '').trim() : '';
@@ -664,11 +792,18 @@ window.VSZhihuParser = {
               }
               if (title && href && !seenUrls.has(href)) {
                 seenUrls.add(href);
+                const authorName =
+                  target.author?.name ||
+                  target.author?.member?.name ||
+                  target.author?.url_token ||
+                  f.author?.name ||
+                  f.author?.member?.name ||
+                  '';
                 feedList.push({
                   id: feedList.length + 1,
                   title: title,
                   href: href,
-                  author: target.author?.name || '知乎用户',
+                  author: authorName ? this.cleanAuthorName(authorName) : '知乎用户',
                   excerpt: (target.excerpt || title).replace(/<[^>]+>/g, '')
                 });
               }
@@ -794,11 +929,18 @@ window.VSZhihuParser = {
       code += `<span class="vsc-answer-card" id="ans-${ans.id}">\n`;
       code += `<span class="syn-cmt">/**\n`;
       code += ` * ANSWER #${idx + 1} by @${escapeHtml(ans.author)} ${ans.badge ? '(' + escapeHtml(ans.badge) + ')' : ''}\n`;
-      code += ` * Votes: ▲ ${ans.voteCount} | Comments: 💬 ${ans.commentCount}\n`;
+      code += ` * Votes: ▲ ${ans.voteCount} | Comments: 💬 ${ans.commentCount}`;
+      if (ans.createdAt) {
+        code += ` | Time: ${escapeHtml(ans.createdAt)}`;
+      }
+      code += `\n`;
       code += ` */</span>\n`;
       code += `<span class="syn-kw">export const</span> <span class="syn-var">answer_${idx + 1}</span>: <span class="syn-type">Answer</span> = {\n`;
       code += `  <span class="syn-var">author</span>: <span class="syn-str">"${escapeHtml(ans.author)}"</span>,\n`;
       code += `  <span class="syn-var">voteCount</span>: <span class="syn-num">${ans.voteCount.replace(/,/g, '')}</span>,\n`;
+      if (ans.createdAt) {
+        code += `  <span class="syn-var">createdAt</span>: <span class="syn-str">"${escapeHtml(ans.createdAt)}"</span>,\n`;
+      }
       code += `  <span class="syn-var">getContent</span>: <span class="syn-kw">function</span>(): <span class="syn-type">string</span> {\n`;
       code += `    <span class="syn-ctrl">return</span> \`\n`;
 
