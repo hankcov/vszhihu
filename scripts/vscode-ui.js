@@ -10,6 +10,11 @@ function escapeHtml(str) {
 window.VSZhihuUI = {
   tabs: [],
   activeTabId: null,
+  _createAppRootCount: 0,
+
+  perfLog: function(msg) {
+    if (window.VSZhihuPerf && window.VSZhihuPerf.log) window.VSZhihuPerf.log(msg);
+  },
 
   fetchApi: function(url) {
     let fetchUrl = url;
@@ -22,10 +27,18 @@ window.VSZhihuUI = {
 
     return fetch(fetchUrl, { headers: { 'Accept': 'application/json' }, credentials: 'include' })
       .then(res => {
-        if (!res.ok) throw new Error('HTTP status ' + res.status);
+        if (!res.ok) {
+          // P1: 403/401 are auth/wAF — background fetch will fail the same way; fail fast.
+          const err = new Error('HTTP status ' + res.status);
+          err.status = res.status;
+          throw err;
+        }
         return res.json();
       })
       .catch(err => {
+        if (err && (err.status === 403 || err.status === 401)) {
+          return Promise.reject(err);
+        }
         return new Promise((resolve, reject) => {
           let sentMessage = false;
           try {
@@ -101,6 +114,7 @@ window.VSZhihuUI = {
   },
 
   init: function(settings, parsedData) {
+    const __mark = window.VSZhihuPerf ? window.VSZhihuPerf.mark('ui.init') : null;
     this.theme = settings.theme || 'dark-plus';
     this.codeViewMode = settings.codeViewMode || 'code';
     this.customBossCode = settings.customBossCode || '';
@@ -139,12 +153,19 @@ window.VSZhihuUI = {
 
     this.setFavicon();
     this.createBossScreen();
-    this.createAppRoot();
+    this.createAppRoot('init');
     this.bindShortcuts();
     this.updatePageTitle();
 
     if (window.VSZhihuCommandPalette) {
       window.VSZhihuCommandPalette.init(this);
+    }
+
+    if (window.VSZhihuPerf && __mark) {
+      window.VSZhihuPerf.end(__mark, 'type=' + (parsedData.type || 'feed') +
+        ' answers=' + (parsedData.answers ? parsedData.answers.length : 0) +
+        ' feed=' + (parsedData.feedList ? parsedData.feedList.length : 0) +
+        ' codeLen=' + initialCode.length);
     }
   },
 
@@ -286,24 +307,58 @@ window.VSZhihuUI = {
     }
   },
 
-  createAppRoot: function() {
-    let app = document.getElementById('vsc-app-root');
-    const existingCodeView = document.getElementById('vsc-code-view');
-    const savedScrollTop = existingCodeView ? existingCodeView.scrollTop : 0;
-
-    if (!app) {
-      if (!document.body) return;
-      app = document.createElement('div');
-      app.id = 'vsc-app-root';
-      document.body.appendChild(app);
-    }
+  createAppRoot: function(reason) {
+    const __mark = window.VSZhihuPerf ? window.VSZhihuPerf.mark('ui.createAppRoot') : null;
+    this._createAppRootCount = (this._createAppRootCount || 0) + 1;
 
     const activeTab = this.tabs.find(t => t.id === this.activeTabId) || this.tabs[0];
     const filename = activeTab ? activeTab.title : this.getFileName();
     const formattedCode = activeTab ? activeTab.formattedCode : (window.VSZhihuParser ? window.VSZhihuParser.formatAsTypeScript(this.parsedData) : '');
     const lineCount = (formattedCode || '').split('\n').length;
+    const lineNumsHtml = Array.from({ length: lineCount }, (_, i) => `<div class="vsc-line-num">${i + 1}</div>`).join('');
 
-    app.innerHTML = `
+    const app = document.getElementById('vsc-app-root');
+    const canvas = document.getElementById('vsc-canvas');
+    const gutter = document.getElementById('vsc-gutter');
+    const bcFile = document.getElementById('vsc-bc-filename');
+    const bcType = document.getElementById('vsc-bc-type');
+
+    // A: shell unchanged → update only dynamic nodes (avoid full innerHTML rebuild).
+    if (app && canvas && gutter && reason !== 'init') {
+      canvas.innerHTML = formattedCode;
+      gutter.innerHTML = lineNumsHtml;
+      if (bcFile) bcFile.innerText = filename;
+      if (bcType) bcType.innerText = activeTab ? (activeTab.type || 'feed') : 'feed';
+      this.renderTabBar();
+      this.renderOpenEditors();
+      this.bindClickEvents();
+      // Partial refresh must NOT reopen comment panel (it resets + refetches).
+      const codeView = document.getElementById('vsc-code-view');
+      if (codeView) this.bindInfiniteScroll(codeView);
+
+      if (window.VSZhihuPerf && __mark) {
+        window.VSZhihuPerf.end(__mark, 'mode=partial reason=' + (reason || 'unknown') +
+          ' n=' + this._createAppRootCount + ' lines=' + lineCount + ' codeLen=' + (formattedCode || '').length);
+      }
+      return;
+    }
+
+    let root = app;
+    let savedScrollTop = 0;
+    const existingCodeView = document.getElementById('vsc-code-view');
+    if (existingCodeView) savedScrollTop = existingCodeView.scrollTop;
+
+    // Full rebuild destroys #vsc-bottom-panel (inside app). Cache comments HTML first.
+    const preservedTerminal = this._snapshotCommentTerminal();
+
+    if (!root) {
+      if (!document.body) return;
+      root = document.createElement('div');
+      root.id = 'vsc-app-root';
+      document.body.appendChild(root);
+    }
+
+    root.innerHTML = `
       <!-- Left Activity Bar -->
       <div id="vsc-activity-bar">
         <div class="vsc-act-group">
@@ -384,7 +439,7 @@ window.VSZhihuUI = {
         <!-- Code View -->
         <div id="vsc-code-view">
           <div id="vsc-gutter">
-            ${Array.from({ length: lineCount }, (_, i) => `<div class="vsc-line-num">${i + 1}</div>`).join('')}
+            ${lineNumsHtml}
           </div>
           <div id="vsc-canvas">${formattedCode}</div>
         </div>
@@ -429,7 +484,7 @@ window.VSZhihuUI = {
     this.bindClickEvents();
 
     if (this.activeTerminal) {
-      this.openCommentTerminal(this.activeTerminal.answerIdx, this.activeTerminal.answerId);
+      this.openCommentTerminal(this.activeTerminal.answerIdx, this.activeTerminal.answerId, preservedTerminal);
     }
 
     const newCodeView = document.getElementById('vsc-code-view');
@@ -438,6 +493,11 @@ window.VSZhihuUI = {
         newCodeView.scrollTop = savedScrollTop;
       }
       this.bindInfiniteScroll(newCodeView);
+    }
+
+    if (window.VSZhihuPerf && __mark) {
+      window.VSZhihuPerf.end(__mark, 'mode=full reason=' + (reason || 'unknown') +
+        ' n=' + this._createAppRootCount + ' lines=' + lineCount + ' codeLen=' + (formattedCode || '').length);
     }
   },
 
@@ -576,6 +636,8 @@ window.VSZhihuUI = {
 
   openInNewTab: function(url, titleHint) {
     if (!url || url.startsWith('javascript:')) return;
+    const __mark = window.VSZhihuPerf ? window.VSZhihuPerf.mark('ui.openInNewTab') : null;
+    const __loadMark = window.VSZhihuPerf ? window.VSZhihuPerf.mark('ui.openInNewTab.load') : null;
 
     let fullUrl = url;
     if (fullUrl.startsWith('//')) fullUrl = 'https:' + fullUrl;
@@ -628,51 +690,264 @@ window.VSZhihuUI = {
     const self = this;
     const requestUrl = fullUrl;
 
-    const performFetch = (targetUrl) => {
-      return new Promise((resolve, reject) => {
-        let sentMessage = false;
-        try {
-          if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id && chrome.runtime.sendMessage) {
-            sentMessage = true;
-            chrome.runtime.sendMessage({ action: 'fetchUrl', url: targetUrl }, (res) => {
-              if (chrome.runtime.lastError || !res || !res.success) {
-                fetch(targetUrl, { credentials: 'include' })
-                  .then(r => r.text())
-                  .then(resolve)
-                  .catch(reject);
-              } else {
-                resolve(res.data);
-              }
-            });
-          }
-        } catch(e) {
-          sentMessage = false;
-        }
+    // Prefer same-origin page fetch (Brave: SW fetch often loses session / returns a 584B shell).
+    const pageFetch = (targetUrl) =>
+      fetch(targetUrl, {
+        credentials: 'include',
+        headers: {
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        redirect: 'follow'
+      }).then(async r => {
+        const text = await r.text();
+        return { ok: r.ok, status: r.status, finalUrl: r.url || targetUrl, data: text };
+      });
 
-        if (!sentMessage) {
-          fetch(targetUrl, { credentials: 'include' })
-            .then(r => r.text())
-            .then(resolve)
-            .catch(reject);
+    const backgroundFetch = (targetUrl) =>
+      new Promise((resolve, reject) => {
+        try {
+          if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.id || !chrome.runtime.sendMessage) {
+            resolve(null);
+            return;
+          }
+          chrome.runtime.sendMessage({ action: 'fetchUrl', url: targetUrl }, (res) => {
+            if (chrome.runtime.lastError || !res || !res.success) {
+              resolve(null);
+            } else {
+              resolve({ ok: true, status: 200, finalUrl: targetUrl, data: res.data, via: 'background' });
+            }
+          });
+        } catch (e) {
+          resolve(null);
         }
       });
+
+    const looksUsefulHtml = (html) =>
+      typeof html === 'string' && html.length > 2000 &&
+      /js-initialData|RichText|CopyrightRichText|QuestionHeader|AnswerItem|zhihu/i.test(html);
+
+    const fetchAnswerViaApi = (answerId) => {
+      const qid = (requestUrl.match(/question\/(\d+)/) || [])[1] || '';
+      const api = `https://www.zhihu.com/api/v4/answers/${answerId}?include=data%5B*%5D.content%2Cexcerpt%2Cvoteup_count%2Ccomment_count%2Cauthor%2Cbadge%2Ccreated_time%2Cupdated_time%2Cquestion.title`;
+
+      // P0: only await the answer API. Title comes from include; optional non-blocking fill.
+      return self.fetchApi(api).then(json => {
+        const ans = json && (json.data || json);
+        if (!ans || (!ans.content && !ans.excerpt)) return null;
+        const raw = ans.content || ans.excerpt || '';
+        const cText = window.VSZhihuParser
+          ? window.VSZhihuParser.cleanContentText(raw)
+          : String(raw).replace(/<[^>]+>/g, '').trim();
+        if (!cText) return null;
+        const embeddedTitle = (ans.question && ans.question.title) || '';
+        const createdAt = window.VSZhihuParser
+          ? window.VSZhihuParser.formatAnswerTime(ans.created_time || ans.updated_time)
+          : '';
+        const titleFromUrl = qid ? `question_${qid}.ts` : title;
+        const data = {
+          type: 'question',
+          title: embeddedTitle || (qid ? `问题 ${qid}` : (ans.author?.name ? `@${ans.author.name} 的回答` : '知乎回答')),
+          detail: '',
+          answers: [{
+            id: 1,
+            answerId: String(ans.id || answerId),
+            author: ans.author?.name || '知乎用户',
+            badge: ans.author?.headline || '',
+            voteCount: String(ans.voteup_count || 0),
+            commentCount: String(ans.comment_count || 0),
+            contentHtml: ans.content || '',
+            contentText: cText,
+            createdAt: createdAt,
+            comments: []
+          }],
+          isSingleAnswer: requestUrl.includes('/answer/'),
+          questionId: qid,
+          questionUrl: qid ? `/question/${qid}` : '',
+          viewAllText: '查看全部回答',
+          _via: 'api',
+          _titleFile: titleFromUrl
+        };
+
+        // Non-blocking title fill if answer payload had no question.title.
+        if (!embeddedTitle && qid) {
+          self.fetchApi(`https://www.zhihu.com/api/v4/questions/${qid}?include=title`)
+            .then(j => {
+              const t = j && (j.title || j.data?.title);
+              if (!t || !data) return;
+              data.title = t;
+              const tab = self.tabs.find(x => x.url === fullUrl || x.url === baseUrl);
+              if (tab) {
+                tab.parsedData = data;
+                tab.title = window.VSZhihuParser
+                  ? window.VSZhihuParser.getFileName(data, requestUrl)
+                  : tab.title;
+                if (self.activeTabId === tab.id) {
+                  self.renderTabBar();
+                  self.renderOpenEditors();
+                  self.renderActiveTab();
+                }
+              }
+            })
+            .catch(() => {});
+        }
+
+        return data;
+      }).catch(() => null);
     };
 
-    performFetch(requestUrl)
-      .then(htmlText => {
-        let parsedData = null;
-        let formattedCode = '';
+    const answerIdFromUrl = (requestUrl.match(/\/answer\/(\d{8,20})/) || [])[1] || '';
 
-        if (typeof htmlText === 'string') {
-          const parser = new DOMParser();
-          const doc = parser.parseFromString(htmlText, 'text/html');
-          if (window.VSZhihuParser) {
-            parsedData = window.VSZhihuParser.parsePage(doc, requestUrl);
-            formattedCode = window.VSZhihuParser.formatAsTypeScript(parsedData);
+    const loadTabHtmlData = (htmlText) => {
+      if (!htmlText || !window.VSZhihuParser) return null;
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlText, 'text/html');
+      return window.VSZhihuParser.parsePage(doc, requestUrl);
+    };
+
+    const loadTabContent = async () => {
+      // 0) If live page already is this URL, parse the real DOM (most reliable).
+      try {
+        const livePath = window.location.pathname + window.location.search;
+        const reqPath = new URL(requestUrl).pathname + new URL(requestUrl).search;
+        if (livePath === reqPath || window.location.href.split('#')[0] === baseUrl) {
+          const liveData = window.VSZhihuParser ? window.VSZhihuParser.parsePage(document, requestUrl) : null;
+          if (liveData && ((liveData.answers && liveData.answers.length > 0) || (liveData.feedList && liveData.feedList.length > 0))) {
+            return { source: 'live-dom', parsedData: liveData, htmlNote: '' };
           }
-        } else if (typeof htmlText === 'object') {
-          parsedData = htmlText;
-          formattedCode = JSON.stringify(htmlText, null, 2);
+        }
+      } catch (e) {}
+
+      // 0.5) D: single-answer URL → prefer lightweight JSON API over full HTML page.
+      if (answerIdFromUrl) {
+        try {
+          const apiData = await fetchAnswerViaApi(answerIdFromUrl);
+          if (apiData && apiData.answers && apiData.answers.length > 0 &&
+              apiData.answers[0].contentText && apiData.answers[0].contentText.length > 0) {
+            return { source: 'api', parsedData: apiData, htmlText: '', fetchNote: 'answer-api-first' };
+          }
+        } catch (e) {}
+      }
+
+      // 1) Page-context fetch first (session cookies intact under Brave).
+      let htmlText = '';
+      let fetchNote = '';
+      try {
+        const pageRes = await pageFetch(requestUrl);
+        htmlText = pageRes.data || '';
+        fetchNote = `pageFetch status=${pageRes.status} len=${htmlText.length} final=${pageRes.finalUrl}`;
+      } catch (e) {
+        fetchNote = `pageFetch error=${e.message}`;
+      }
+
+      // 2) Background fetch only if page fetch useless.
+      if (!looksUsefulHtml(htmlText)) {
+        const bgRes = await backgroundFetch(requestUrl);
+        if (bgRes && typeof bgRes.data === 'string' && bgRes.data.length > htmlText.length) {
+          htmlText = bgRes.data;
+          fetchNote += ` | bgFetch len=${htmlText.length}`;
+        } else {
+          fetchNote += ` | bgFetch=skip/weak`;
+        }
+      }
+
+      let parsedData = htmlText ? loadTabHtmlData(htmlText) : null;
+      if (parsedData && parsedData.answers && parsedData.answers.length > 0) {
+        return { source: 'html', parsedData, htmlText, fetchNote };
+      }
+
+      // 3) API fallback if D first-pass missed (e.g. API rate-limited / empty).
+      if (answerIdFromUrl) {
+        const apiData = await fetchAnswerViaApi(answerIdFromUrl);
+        if (apiData) {
+          return { source: 'api', parsedData: apiData, htmlText, fetchNote: fetchNote + ' | fallback=answer-api' };
+        }
+      }
+
+      // Question page with empty answers: try question answers API.
+      const qid = (requestUrl.match(/question\/(\d+)/) || [])[1];
+      if (qid) {
+        try {
+          const apiUrl = `https://www.zhihu.com/api/v4/questions/${qid}/answers?include=data%5B*%5D.content%2Cexcerpt%2Cvoteup_count%2Ccomment_count%2Cauthor%2Cbadge%2Ccreated_time%2Cupdated_time&limit=10&offset=0`;
+          const json = await self.fetchApi(apiUrl);
+          const list = json && json.data;
+          if (Array.isArray(list) && list.length > 0) {
+            const answers = list.map((ans, idx) => {
+              const raw = ans.content || ans.excerpt || '';
+              const cText = window.VSZhihuParser ? window.VSZhihuParser.cleanContentText(raw) : String(raw).replace(/<[^>]+>/g, '').trim();
+              return {
+                id: idx + 1,
+                answerId: String(ans.id || idx + 1),
+                author: ans.author?.name || '知乎用户',
+                badge: ans.author?.headline || '',
+                voteCount: String(ans.voteup_count || 0),
+                commentCount: String(ans.comment_count || 0),
+                contentHtml: ans.content || '',
+                contentText: cText,
+                createdAt: window.VSZhihuParser ? window.VSZhihuParser.formatAnswerTime(ans.created_time || ans.updated_time) : '',
+                comments: []
+              };
+            }).filter(a => a.contentText);
+            if (answers.length > 0) {
+              const htmlParsedTitle = parsedData?.title || '';
+              const isFakeTitle = !htmlParsedTitle || /^问题\s*\d+$/.test(htmlParsedTitle);
+              return {
+                source: 'api',
+                parsedData: {
+                  type: 'question',
+                  title: (!isFakeTitle && htmlParsedTitle) || `问题 ${qid}`,
+                  detail: parsedData?.detail || '',
+                  answers,
+                  isSingleAnswer: requestUrl.includes('/answer/'),
+                  questionId: qid,
+                  questionUrl: `/question/${qid}`,
+                  viewAllText: '查看全部回答',
+                  _via: 'question-api'
+                },
+                htmlText,
+                fetchNote: fetchNote + ' | fallback=question-api'
+              };
+            }
+          }
+        } catch (e) {}
+      }
+
+      return {
+        source: 'failed',
+        parsedData: parsedData || null,
+        htmlText,
+        fetchNote
+      };
+    };
+
+    loadTabContent()
+      .then(result => {
+        let parsedData = result.parsedData;
+        let formattedCode = '';
+        const htmlText = result.htmlText || '';
+        const fetchNote = result.fetchNote || result.source;
+        if (window.VSZhihuPerf && __loadMark) {
+          window.VSZhihuPerf.end(__loadMark, 'src=' + result.source +
+            ' htmlLen=' + htmlText.length + ' note=' + String(fetchNote).slice(0, 200));
+        }
+
+        if (parsedData) {
+          formattedCode = window.VSZhihuParser ? window.VSZhihuParser.formatAsTypeScript(parsedData) : '';
+          const answerCount = parsedData.answers?.length || 0;
+          const looksLikeQuestion = (parsedData.type === 'question') || requestUrl.includes('/question/');
+
+          if (looksLikeQuestion && answerCount === 0) {
+            const hasRichHint = /RichText|CopyrightRichText|js-initialData|AnswerItem/i.test(htmlText || '');
+            formattedCode += `\n<span class="syn-cmt">// ⚠️ 未解析到回答正文 (answers=0, html=${(htmlText || '').length}B, hint=${hasRichHint}, src=${result.source}).\n`;
+            formattedCode += `// fetch: ${escapeHtml(fetchNote)}\n`;
+            if (!hasRichHint) {
+              formattedCode += `// 可能原因: 扩展后台抓取被 Brave 拦截 / 返回壳页 (API 兜底也失败).\n// 建议: 对 zhihu.com 关闭 Shields，或检查登录态.\n`;
+            }
+            formattedCode += `// URL: ${escapeHtml(requestUrl)}</span>\n`;
+          } else if (result.source === 'api') {
+            formattedCode = `<span class="syn-cmt">// via ${escapeHtml(result.parsedData?._via || 'api')} | ${escapeHtml(fetchNote)}</span>\n` + formattedCode;
+          }
+        } else {
+          formattedCode = `<span class="syn-cmt">// ⚠️ 加载失败，无法拿到正文\n// fetch: ${escapeHtml(fetchNote)}\n// URL: ${escapeHtml(requestUrl)}</span>`;
         }
 
         if (parsedData) {
@@ -682,16 +957,24 @@ window.VSZhihuUI = {
           newTab.type = parsedData.type || 'general';
           newTab.formattedCode = formattedCode || `<span class="syn-cmt">// 无法解析该页面内容</span>`;
           newTab.status = 'loaded';
+        } else {
+          newTab.formattedCode = formattedCode;
+          newTab.status = 'error';
+        }
 
-          if (self.activeTabId === tabId) {
-            self.renderTabBar();
-            self.renderOpenEditors();
-            self.renderActiveTab();
-          }
+        if (self.activeTabId === tabId) {
+          self.renderTabBar();
+          self.renderOpenEditors();
+          self.renderActiveTab();
+        }
+        if (window.VSZhihuPerf && __mark) {
+          window.VSZhihuPerf.end(__mark, 'status=' + newTab.status +
+            ' src=' + result.source + ' answers=' + (newTab.parsedData && newTab.parsedData.answers ? newTab.parsedData.answers.length : 0));
         }
       })
       .catch(err => {
         console.error('[VSCode-Zhihu] Fetch tab error:', err);
+        if (window.VSZhihuPerf && __mark) window.VSZhihuPerf.end(__mark, 'error=' + (err && err.message));
         newTab.formattedCode = `<span class="syn-cmt">// ⚠️ 加载失败: ${escapeHtml(err.message || '网络连接或页面解析异常')}\n// 您可以点击原生链接直接访问: <a href="${requestUrl}" target="_blank" class="vsc-code-link">${escapeHtml(requestUrl)}</a></span>`;
         newTab.status = 'error';
         if (self.activeTabId === tabId) {
@@ -705,6 +988,7 @@ window.VSZhihuUI = {
 
     const parsed = tab.parsedData;
     if (!parsed || parsed.type !== 'question') return Promise.resolve();
+    if (parsed.isSingleAnswer) return Promise.resolve();
 
     let qid = parsed.questionId;
     if (!qid && tab.url) {
@@ -712,15 +996,17 @@ window.VSZhihuUI = {
     }
     if (!qid) return Promise.resolve();
 
+    const __mark = window.VSZhihuPerf ? window.VSZhihuPerf.mark('ui.fetchMoreAnswers') : null;
     tab.isFetchingMore = true;
     const offset = parsed.answers ? parsed.answers.length : 0;
-    const apiUrl = `https://www.zhihu.com/api/v4/questions/${qid}/answers?include=data%5B*%5D.content%2Cexcerpt%2Cvoteup_count%2Ccomment_count%2Cauthor%2Cbadge&limit=10&offset=${offset}`;
+    const apiUrl = `https://www.zhihu.com/api/v4/questions/${qid}/answers?include=data%5B*%5D.content%2Cexcerpt%2Cvoteup_count%2Ccomment_count%2Cauthor%2Cbadge%2Ccreated_time%2Cupdated_time&limit=10&offset=${offset}`;
 
     const self = this;
     return this.fetchApi(apiUrl)
       .then(json => {
         tab.isFetchingMore = false;
         if (!json || !json.data || !Array.isArray(json.data) || json.data.length === 0) {
+          if (window.VSZhihuPerf && __mark) window.VSZhihuPerf.end(__mark, 'empty offset=' + offset);
           return;
         }
 
@@ -747,6 +1033,7 @@ window.VSZhihuUI = {
               commentCount: commentCount,
               contentHtml: ans.content || '',
               contentText: cText,
+              createdAt: window.VSZhihuParser ? window.VSZhihuParser.formatAnswerTime(ans.created_time || ans.updated_time) : '',
               comments: []
             });
           }
@@ -766,14 +1053,20 @@ window.VSZhihuUI = {
             }
           }
         }
+        if (window.VSZhihuPerf && __mark) {
+          window.VSZhihuPerf.end(__mark, 'offset=' + offset + ' raw=' + json.data.length + ' added=' + newAnswers.length);
+        }
       })
       .catch(err => {
         tab.isFetchingMore = false;
+        if (window.VSZhihuPerf && __mark) window.VSZhihuPerf.end(__mark, 'error=' + (err && err.message));
         console.error('[VSCode-Zhihu] fetchMoreAnswers error:', err);
       });
   },
 
   bindInfiniteScroll: function(codeViewEl) {
+    if (!codeViewEl || codeViewEl._vscInfiniteBound) return;
+    codeViewEl._vscInfiniteBound = true;
     let isLoading = false;
     const self = this;
 
@@ -783,7 +1076,7 @@ window.VSZhihuUI = {
           isLoading = true;
 
           const activeTab = self.tabs?.find(t => t.id === self.activeTabId);
-          if (activeTab && activeTab.parsedData && activeTab.parsedData.type === 'question') {
+          if (activeTab && activeTab.parsedData && activeTab.parsedData.type === 'question' && !activeTab.parsedData.isSingleAnswer) {
             self.fetchMoreAnswers(activeTab).finally(() => {
               setTimeout(() => { isLoading = false; }, 350);
             });
@@ -1179,8 +1472,46 @@ window.VSZhihuUI = {
     });
   },
 
-  openCommentTerminal: function(answerIdx, answerId) {
+  _snapshotCommentTerminal: function() {
+    if (!this.activeTerminal) return null;
+    const list = document.getElementById('vsc-term-comments-list');
+    const term = document.getElementById('vsc-term-comments');
+    if (!list) return null;
+    const html = list.innerHTML;
+    const isLoading = !html || html.indexOf('Fetching live comment thread') !== -1;
+    if (isLoading) return null;
+    return {
+      answerIdx: this.activeTerminal.answerIdx,
+      answerId: this.activeTerminal.answerId,
+      listHtml: html,
+      termExtraHtml: term ? Array.from(term.children)
+        .filter(el => el.id !== 'vsc-term-comments-list')
+        .map(el => el.outerHTML).join('') : ''
+    };
+  },
+
+  openCommentTerminal: function(answerIdx, answerId, preserved) {
+    const nextKey = String(answerId || '') + '#' + String(answerIdx);
+    const prev = this.activeTerminal;
+    const sameTarget = prev && String(prev.answerId || '') + '#' + String(prev.answerIdx) === nextKey;
+
+    // Idempotent: same target + panel already loaded → just show, do not reset/refetch.
+    const existingPanel = document.getElementById('vsc-bottom-panel');
+    const existingList = document.getElementById('vsc-term-comments-list');
+    if (existingPanel && existingList && sameTarget) {
+      const cur = existingList.innerHTML;
+      const hasLoaded = cur && cur.indexOf('Fetching live comment thread') === -1 && cur.length > 0;
+      if (hasLoaded) {
+        existingPanel.style.display = 'flex';
+        this.activeTerminal = { answerIdx, answerId };
+        return;
+      }
+    }
+
     this.activeTerminal = { answerIdx, answerId };
+    this._commentFetchToken = (this._commentFetchToken || 0) + 1;
+    const fetchToken = this._commentFetchToken;
+
     let panel = document.getElementById('vsc-bottom-panel');
     const editor = document.getElementById('vsc-main-editor');
     if (!editor) return;
@@ -1200,6 +1531,11 @@ window.VSZhihuUI = {
     const apiCategory = isArticle ? 'articles' : 'answers';
     const statusCategory = isArticle ? 'article' : 'answer';
 
+    // Prefer preserved HTML from full rebuild (same target).
+    const canRestore = preserved &&
+      String(preserved.answerId || '') + '#' + String(preserved.answerIdx) === nextKey &&
+      preserved.listHtml;
+
     panel.innerHTML = `
       <div class="vsc-panel-header">
         <div class="vsc-panel-tabs">
@@ -1217,14 +1553,23 @@ window.VSZhihuUI = {
         <div><span class="vsc-term-prompt">bash-5.2$</span> zhihu-cli comments --target ${statusCategory}/${targetAnswerId || 'N/A'} --author "@${authorName}"</div>
         <div style="color: var(--vsc-fg-muted); margin: 6px 0;">[Zhihu API] Connecting to live comment stream for ${statusCategory}/${targetAnswerId || 'N/A'}...</div>
         <div id="vsc-term-comments">
-          <div id="vsc-term-comments-list">Fetching live comment thread...</div>
+          <div id="vsc-term-comments-list">${canRestore ? preserved.listHtml : 'Fetching live comment thread...'}</div>
         </div>
       </div>
     `;
 
+    if (canRestore) {
+      if (preserved.termExtraHtml) {
+        document.getElementById('vsc-term-comments')?.insertAdjacentHTML('beforeend', preserved.termExtraHtml);
+      }
+      // Restored content is enough; skip refetch.
+      return;
+    }
+
     if (targetAnswerId && !isArticle) {
       this.fetchCommentThread(apiCategory, targetAnswerId, 0)
         .then(json => {
+          if (fetchToken !== this._commentFetchToken) return;
           const container = document.getElementById('vsc-term-comments-list');
           const termBox = document.getElementById('vsc-term-comments');
           if (!container) return;
@@ -1294,6 +1639,7 @@ window.VSZhihuUI = {
           }
         })
         .catch(() => {
+          if (fetchToken !== this._commentFetchToken) return;
           this.renderFallbackDomComments(answerIdx);
         });
     } else {
