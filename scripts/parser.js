@@ -733,22 +733,38 @@ window.VSZhihuParser = {
       if (href.startsWith('//')) href = 'https:' + href;
       else if (href.startsWith('/')) href = 'https://www.zhihu.com' + href;
 
-      // Prefer specific author nodes first — bare .AuthorInfo is an ancestor and
-      // would win document-order querySelector, often yielding empty/noise text.
-      const authorEl =
-        item.querySelector('.AuthorInfo-name a.UserLink-link, .AuthorInfo-name .UserLink-link, .AuthorInfo-name a[href*="/people/"]') ||
-        item.querySelector('a.UserLink-link[href*="/people/"], a.UserLink-link') ||
-        item.querySelector('.AuthorInfo-name, [itemprop="name"]') ||
-        item.querySelector('a[href*="/people/"]') ||
-        item.querySelector('.ContentItem-meta a[href^="/people/"], .ContentItem-meta [class*="Author"]') ||
-        null;
-      const rawAuthor = authorEl ? (authorEl.getAttribute('content') || authorEl.innerText || authorEl.textContent || '') : '';
-      const author = rawAuthor
-        ? this.cleanAuthorName(rawAuthor)
-        : '知乎推荐';
-
       const excerptEl = item.querySelector('.RichText, .ContentItem-excerpt, .HotItem-excerpt, .CopyrightRichText-richText, .RichContent-inner');
       const excerpt = excerptEl ? (excerptEl.innerText || excerptEl.textContent || '').trim() : '';
+
+      // Prefer person-profile links only — bare a.UserLink-link / itemprop can hit the title.
+      const titleLink = titleEl;
+      const authorEl =
+        item.querySelector('.AuthorInfo-name a[href*="/people/"], .AuthorInfo-name a.UserLink-link[href*="/people/"]') ||
+        item.querySelector('a.UserLink-link[href*="/people/"]') ||
+        item.querySelector('a[href*="/people/"]') ||
+        item.querySelector('.AuthorInfo-name') ||
+        item.querySelector('.ContentItem-meta a[href*="/people/"]') ||
+        null;
+
+      let rawAuthor = '';
+      if (authorEl && authorEl !== titleLink) {
+        rawAuthor = authorEl.getAttribute('content') || authorEl.innerText || authorEl.textContent || '';
+      }
+      let author = rawAuthor ? this.cleanAuthorName(rawAuthor) : '';
+
+      // Some topstory cards only put "作者名：摘要…" in RichText — no AuthorInfo node.
+      if (!author || author === '知乎用户' || author === title) {
+        const prefix = excerpt.match(/^\s*([^\s:：，,。.、…]{1,20})\s*[：:]/);
+        if (prefix && prefix[1] && prefix[1] !== title) {
+          author = this.cleanAuthorName(prefix[1]);
+        }
+      }
+
+      // Never let author collapse into the card title.
+      if (!author || author === '知乎用户' || author === title ||
+          (title && author.length > title.length && author.indexOf(title) === 0)) {
+        author = '知乎推荐';
+      }
 
       const metricsEl = item.querySelector('.ContentItem-actions, .HotItem-metrics, .ContentItem-meta');
       const metrics = metricsEl ? (metricsEl.innerText || metricsEl.textContent || '').replace(/\s+/g, ' ').trim() : '';
