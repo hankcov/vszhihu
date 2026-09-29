@@ -24,7 +24,7 @@ html.vsc-enabled body {
 }
 
 /* Hide original Zhihu header and extra native chrome elements visually behind VS Code overlay */
-html.vsc-enabled body > *:not(#vsc-app-root):not(#vsc-boss-screen):not(#vsc-cmd-palette-overlay) {
+html.vsc-enabled body > *:not(#vsc-app-root):not(#vsc-boss-screen):not(#vsc-cmd-palette-overlay):not(#vsc-img-preview) {
   opacity: 0 !important;
   position: absolute !important;
   z-index: -9999 !important;
@@ -633,6 +633,41 @@ html.vsc-enabled body > *:not(#vsc-app-root):not(#vsc-boss-screen):not(#vsc-cmd-
   margin: 12px 0;
   box-shadow: 0 4px 12px var(--vsc-shadow);
   border: 1px solid var(--vsc-border);
+}
+
+/* Comment-style image placeholder in code view */
+.vsc-img-ph {
+  cursor: help;
+  border-bottom: 1px dashed transparent;
+}
+
+.vsc-img-ph:hover {
+  border-bottom-color: currentColor;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* Hover preview popup (single global node, appended to body) */
+#vsc-img-preview {
+  display: none;
+  position: fixed;
+  z-index: 2147483647;
+  max-width: 480px;
+  max-height: 70vh;
+  padding: 6px;
+  background: var(--vsc-bg-editor, #1e1e1e);
+  border: 1px solid var(--vsc-border, #3c3c3c);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+#vsc-img-preview img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: calc(70vh - 14px);
+  border-radius: 4px;
 }
 
 /* ==========================================================================

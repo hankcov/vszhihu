@@ -155,6 +155,7 @@ window.VSZhihuUI = {
     this.createBossScreen();
     this.createAppRoot('init');
     this.bindShortcuts();
+    this.initImageHoverPreview();
     this.updatePageTitle();
 
     if (window.VSZhihuCommandPalette) {
@@ -1748,5 +1749,88 @@ window.VSZhihuUI = {
         this.toggleBossKey();
       }
     });
+  },
+
+  initImageHoverPreview: function() {
+    if (window.__vscImgHoverInit) return;
+    window.__vscImgHoverInit = true;
+
+    let preview = null;
+    let currentPh = null;
+    let anchorRect = null;
+
+    const ensurePreview = () => {
+      if (preview && preview.isConnected) return preview;
+      preview = document.getElementById('vsc-img-preview');
+      if (!preview) {
+        preview = document.createElement('div');
+        preview.id = 'vsc-img-preview';
+        const img = document.createElement('img');
+        img.alt = 'preview';
+        img.addEventListener('load', position);
+        img.addEventListener('error', hide);
+        preview.appendChild(img);
+        document.body.appendChild(preview);
+      }
+      return preview;
+    };
+
+    const position = () => {
+      if (!preview || !preview.isConnected || !anchorRect) return;
+      const pw = preview.offsetWidth;
+      const phh = preview.offsetHeight;
+      if (!pw || !phh) return;
+      let left = anchorRect.right + 12;
+      if (left + pw > window.innerWidth - 8) left = anchorRect.left - pw - 12;
+      if (left < 8) left = Math.max(8, Math.min(anchorRect.left, window.innerWidth - pw - 8));
+      let top = anchorRect.top;
+      if (top + phh > window.innerHeight - 8) top = Math.max(8, window.innerHeight - phh - 8);
+      preview.style.left = left + 'px';
+      preview.style.top = top + 'px';
+    };
+
+    function hide() {
+      currentPh = null;
+      anchorRect = null;
+      if (preview && preview.isConnected) preview.style.display = 'none';
+    }
+
+    const show = (ph) => {
+      if (currentPh === ph && preview && preview.style.display === 'block') return;
+      const p = ensurePreview();
+      const img = p.querySelector('img');
+      const url = ph.getAttribute('data-img') || '';
+      if (!url) return;
+      currentPh = ph;
+      anchorRect = ph.getBoundingClientRect();
+      if (img.getAttribute('src') !== url) img.setAttribute('src', url);
+      p.style.display = 'block';
+      position();
+    };
+
+    document.addEventListener('mouseover', (e) => {
+      try {
+        const t = e.target;
+        if (!t || !t.closest) return;
+        const ph = t.closest('.vsc-img-ph');
+        if (ph) { show(ph); return; }
+        // Moved off the placeholder (or it was re-rendered away) — hide stale preview.
+        if (currentPh) hide();
+      } catch (err) {}
+    });
+
+    document.addEventListener('mouseout', (e) => {
+      try {
+        const t = e.target;
+        if (!t || !t.closest) return;
+        const ph = t.closest('.vsc-img-ph');
+        if (!ph) return;
+        const to = e.relatedTarget;
+        if (to && to.closest && to.closest('.vsc-img-ph') === ph) return;
+        hide();
+      } catch (err) {}
+    });
+
+    window.addEventListener('scroll', hide, true);
   }
 };
