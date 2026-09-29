@@ -1089,7 +1089,7 @@ window.VSZhihuParser = {
 
       code += `};\n`;
       code += `<div class="vsc-action-bar">\n`;
-      code += `  <button class="vsc-btn-action">▲ 赞同 ${ans.voteCount}</button>\n`;
+      code += `  <button class="vsc-btn-action vsc-btn-vote-trigger${ans.voted ? ' voted' : ''}" data-answer-idx="${idx}" data-answer-id="${ans.answerId}">${ans.voted ? '✔ 已赞同' : '▲ 赞同'} ${escapeHtml(ans.voteCount)}</button>\n`;
       code += `  <button class="vsc-btn-action vsc-btn-comment-trigger" data-answer-idx="${idx}" data-answer-id="${ans.answerId}">💬 ${ans.commentCount} 评论/回复区</button>\n`;
       if (data.isSingleAnswer && data.questionUrl) {
         code += `  <a href="${data.questionUrl}" class="vsc-btn-action vsc-btn-view-all" data-question-url="${data.questionUrl}">📖 ${escapeHtml(data.viewAllText || '查看全部回答')}</a>\n`;

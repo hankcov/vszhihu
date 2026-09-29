@@ -706,6 +706,15 @@ html.vsc-enabled body > *:not(#vsc-app-root):not(#vsc-boss-screen):not(#vsc-cmd-
   background-color: rgba(255, 255, 255, 0.15);
 }
 
+#vsc-sb-flash {
+  color: var(--vsc-fg-statusbar);
+  opacity: 0.95;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 46vw;
+}
+
 /* ==========================================================================
    5. Command Palette Modal (Cmd+Shift+P)
    ========================================================================== */
