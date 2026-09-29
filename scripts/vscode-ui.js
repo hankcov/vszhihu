@@ -1765,11 +1765,6 @@ window.VSZhihuUI = {
       if (!preview) {
         preview = document.createElement('div');
         preview.id = 'vsc-img-preview';
-        const img = document.createElement('img');
-        img.alt = 'preview';
-        img.addEventListener('load', position);
-        img.addEventListener('error', hide);
-        preview.appendChild(img);
         document.body.appendChild(preview);
       }
       return preview;
@@ -1798,12 +1793,21 @@ window.VSZhihuUI = {
     const show = (ph) => {
       if (currentPh === ph && preview && preview.style.display === 'block') return;
       const p = ensurePreview();
-      const img = p.querySelector('img');
       const url = ph.getAttribute('data-img') || '';
       if (!url) return;
       currentPh = ph;
       anchorRect = ph.getBoundingClientRect();
-      if (img.getAttribute('src') !== url) img.setAttribute('src', url);
+
+      // Fresh <img> per URL switch: a reused element keeps displaying the OLD
+      // decoded bitmap until the new src loads. A new element is blank until load.
+      const img = document.createElement('img');
+      img.alt = '';
+      img.referrerPolicy = 'no-referrer';
+      img.addEventListener('load', position);
+      img.addEventListener('error', hide);
+      p.replaceChildren(img);
+      img.src = url;
+
       p.style.display = 'block';
       position();
     };
