@@ -421,14 +421,47 @@ window.VSZhihuParser = {
   _htmlToContentText: function(html) {
     if (!html) return '';
     try {
+      // Extract images/captions BEFORE tag-strip, keep position via markers.
+      // Same picture arrives as URL variants (host /width-prefix /size-suffix /
+      // query) — dedupe on a normalized key, keep the first original URL for display.
+      const imgKey = (url) => {
+        const raw = String(url);
+        if (/^https?:\/\/pic[a-z0-9]*\.(zhimg\.com|zhihu\.com)\//i.test(raw)) {
+          const base = raw.split(/[?#]/)[0].toLowerCase()
+            .replace(/^https?:\/\//, '')
+            .replace(/^pic[a-z0-9]*\.(zhimg\.com|zhihu\.com)\//, 'zhimg/');
+          const hash = base.match(/v2-[0-9a-f]{16,}/);
+          if (hash) return 'zhimg/' + hash[0];
+          return base.replace(/^zhimg\/\d{1,4}\//, 'zhimg/')
+                     .replace(/_(?:r|w|b|l|hd|mw|\d+w)(\.[a-z0-9]+)$/, '$1');
+        }
+        return raw;
+      };
+      const seenImgs = new Set();
+      const imgToLocalMarker = (tag) => {
+        const attr = (name) => {
+          const m = tag.match(new RegExp('\\b' + name + '\\s*=\\s*["\']([^"\']+)["\']', 'i'));
+          return m ? m[1] : '';
+        };
+        const url = attr('data-actualsrc') || attr('data-original') || attr('data-src') || attr('src');
+        if (!/^https?:\/\//i.test(url)) return '';
+        const key = imgKey(url);
+        if (seenImgs.has(key)) return '';
+        seenImgs.add(key);
+        return '\n[[img:' + url + ']]\n';
+      };
+
       let raw = String(html)
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
         .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
         .replace(/<svg[\s\S]*?<\/svg>/gi, '')
+        .replace(/<img\b[^>]*>/gi, imgToLocalMarker)
+        .replace(/<figcaption\b[^>]*>/gi, '\n[[cap:')
+        .replace(/<\/figcaption>/gi, ']]\n')
         .replace(/\.css-[^{]+\{[^}]+\}/g, '')
         .replace(/\{[^{}]*dynamic-range-limit[^{}]*\}/gi, '')
         .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<\/(p|div|li|h[1-6]|blockquote|figcaption|pre|figure|tr|section|article|ul|ol)>/gi, '\n\n')
+        .replace(/<\/(p|div|li|h[1-6]|blockquote|pre|figure|tr|section|article|ul|ol)>/gi, '\n\n')
         .replace(/<[^>]+>/g, '');
 
       // Decode entities without assigning innerHTML (avoids Trusted Types / CSP issues).
@@ -642,7 +675,7 @@ window.VSZhihuParser = {
           ansList.forEach((ansObj, idx) => {
             const author = ansObj.author?.name || '知乎用户';
             const rawContent = ansObj.content || ansObj.excerpt || '';
-            const cText = rawContent.replace(/<[^>]+>/g, '').trim();
+            const cText = this.cleanContentText(rawContent);
             if (cText) {
               answers.push({
                 id: idx + 1,
@@ -932,7 +965,14 @@ window.VSZhihuParser = {
     let code = `<span class="syn-kw">import</span> { <span class="syn-type">Question</span>, <span class="syn-type">Answer</span>, <span class="syn-type">User</span> } <span class="syn-kw">from</span> <span class="syn-str">'@zhihu/core'</span>;\n\n`;
     code += `<span class="syn-cmt">/**\n * QUESTION: ${escapeHtml(data.title)}\n`;
     if (data.detail) {
-      code += ` * ${escapeHtml(data.detail).split('\n').join('\n * ')}\n`;
+      String(data.detail).split(/\r?\n/).forEach(dl => {
+        const t = dl.trim();
+        const im = t.match(/^\[\[img:(https?:\/\/[^\]]+)\]\]$/);
+        if (im) { code += ` * 📷 图片(${escapeHtml(shortImgLabel(im[1]))})\n`; return; }
+        const cm = t.match(/^\[\[cap:([\s\S]*?)\]\]$/);
+        if (cm) { code += ` * 图注: ${escapeHtml(cm[1].trim())}\n`; return; }
+        code += (t ? ` * ${escapeHtml(t)}` : ' * ') + '\n';
+      });
     }
     code += ` */</span>\n\n`;
 
@@ -970,7 +1010,18 @@ window.VSZhihuParser = {
           if (emittedLine && blankPending) {
             code += `\n`;
           }
-          code += `      ${escapeHtml(trimmed)}\n`;
+          const imgM = trimmed.match(/^\[\[img:(https?:\/\/[^\]]+)\]\]$/);
+          if (imgM) {
+            const imgUrl = imgM[1];
+            code += `      <span class="vsc-img-ph syn-cmt" data-img="${escapeHtml(imgUrl)}">// 📷 图片(${escapeHtml(shortImgLabel(imgUrl))})</span>\n`;
+          } else {
+            const capM = trimmed.match(/^\[\[cap:([\s\S]*?)\]\]$/);
+            if (capM) {
+              code += `      <span class="syn-cmt">// 图注: ${escapeHtml(capM[1].trim())}</span>\n`;
+            } else {
+              code += `      ${escapeHtml(trimmed)}\n`;
+            }
+          }
           blankPending = false;
           emittedLine = true;
         } else if (emittedLine) {
@@ -1031,6 +1082,17 @@ function escapeHtml(str) {
                     .replace(/>/g, '&gt;')
                     .replace(/"/g, '&quot;')
                     .replace(/'/g, '&#039;');
+}
+
+function shortImgLabel(url) {
+  try {
+    const u = new URL(url);
+    let seg = u.pathname.split('/').filter(Boolean).pop() || '';
+    if (seg.length > 22) seg = seg.slice(0, 19) + '…';
+    return seg ? (u.hostname + '/' + seg) : u.hostname;
+  } catch (e) {
+    return String(url).replace(/^https?:\/\//, '').substring(0, 30);
+  }
 }
 
 if (typeof window !== 'undefined') {
