@@ -1148,6 +1148,79 @@ window.VSZhihuUI = {
     alert(`Code View Mode switched to: ${this.codeViewMode.toUpperCase()}`);
   },
 
+  // Locate the native Zhihu vote button for this answer, strictly guarded:
+  // live URL must belong to this answer/question, and the card must be
+  // verified by answer id. Returns null when no verified native card exists.
+  findNativeVoteButton: function(answerId, activeTab) {
+    try {
+      const loc = window.location;
+      const tabUrl = (activeTab && activeTab.url) || '';
+      const livePath = loc.pathname;
+      const tabPath = tabUrl.split('?')[0].split('#')[0];
+      const liveQ = (livePath.match(/\/question\/(\d+)/) || [])[1] || '';
+      const tabQ = (tabUrl.match(/\/question\/(\d+)/) || [])[1] || '';
+      const liveA = (livePath.match(/\/answer\/(\d+)/) || [])[1] || '';
+      const sameAnswer = !!(answerId && liveA === answerId);
+      const sameQuestion = !!(liveQ && tabQ && liveQ === tabQ);
+      const samePath = !!(tabPath && tabPath === livePath);
+      if (!sameAnswer && !sameQuestion && !samePath) return null;
+
+      const root = document.querySelector('.Question-mainColumn, .Question-main') || document;
+      const sel = '.AnswerCard, .AnswerItem, .ContentItem, .Post-Main, .ArticleItem, .Post-RichTextContainer, .List-item, article';
+      const cards = Array.from(root.querySelectorAll(sel)).filter(c => !c.closest('.QuestionHeader'));
+      let card = null;
+      if (answerId && window.VSZhihuParser) {
+        card = cards.find(c => window.VSZhihuParser.extractAnswerId(c) === answerId)
+            || cards.find(c => c.querySelector('a[href*="/answer/' + answerId + '"]'));
+      }
+      if (!card) return null;
+      return card.querySelector('button.VoteButton, .VoteButton--up, .Button--voteUp, [class*="VoteButton"], [aria-label*="赞同"]');
+    } catch (err) {
+      return null;
+    }
+  },
+
+  // Path C: direct vote via Zhihu web API from the content script (same-origin,
+  // cookies included). Requires _xsrf; zse signing not included yet.
+  voteViaApi: function(answerId, type) {
+    const m = document.cookie.match(/(?:^|;\s*)_xsrf=([^;]+)/);
+    const xsrf = m ? decodeURIComponent(m[1]) : '';
+    if (!xsrf) return Promise.reject(new Error('无 _xsrf cookie'));
+    return fetch('https://www.zhihu.com/api/v4/answers/' + answerId + '/voters', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'content-type': 'application/json',
+        'x-requested-with': 'fetch',
+        'x-xsrftoken': xsrf
+      },
+      body: JSON.stringify({ type: type })
+    }).then(r => r.json().then(data => {
+      const errObj = data && data.error;
+      if (!r.ok || errObj) {
+        throw new Error(String((errObj && (errObj.code || errObj.message)) || ('HTTP ' + r.status)));
+      }
+      return data;
+    }));
+  },
+
+  flashStatus: function(text) {
+    try {
+      const sb = document.getElementById('vsc-statusbar');
+      if (!sb) return;
+      let el = document.getElementById('vsc-sb-flash');
+      if (!el || !sb.contains(el)) {
+        if (el && el.parentNode) el.parentNode.removeChild(el);
+        el = document.createElement('span');
+        el.id = 'vsc-sb-flash';
+        (sb.querySelector('.vsc-sb-section') || sb).appendChild(el);
+      }
+      el.textContent = text;
+      clearTimeout(el._t);
+      el._t = setTimeout(() => { el.textContent = ''; }, 4000);
+    } catch (err) {}
+  },
+
   bindClickEvents: function() {
     if (this._eventsBound) return;
     this._eventsBound = true;
@@ -1184,7 +1257,78 @@ window.VSZhihuUI = {
         return;
       }
 
-      // 4. Comment Trigger / Comment Link
+      // 4. Vote Trigger — cascade: B (native button, verified by answer id) →
+      //    C (POST /api/v4/answers/{id}/voters) → A (local state + explicit feedback).
+      const voteBtn = e.target.closest('.vsc-btn-vote-trigger');
+      if (voteBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const vIdx = parseInt(voteBtn.getAttribute('data-answer-idx'), 10) || 0;
+        const activeTab = (self.tabs || []).find(t => t.id === self.activeTabId);
+        const parsed = activeTab?.parsedData || self.parsedData;
+        const ans = parsed && Array.isArray(parsed.answers) ? parsed.answers[vIdx] : null;
+        const vAnswerId = String(voteBtn.getAttribute('data-answer-id') || ans?.answerId || '');
+
+        // Path B: native card strictly verified by URL + answer id (no index mapping,
+        // no "any card on page" fallback — that could vote the wrong content).
+        const nativeVote = self.findNativeVoteButton(vAnswerId, activeTab);
+
+        let vTarget;
+        if (nativeVote) {
+          const ntxt = (nativeVote.innerText || nativeVote.textContent || '');
+          const nativeVoted = /已赞同|取消赞同/.test(ntxt) || nativeVote.getAttribute('aria-pressed') === 'true';
+          vTarget = !nativeVoted;
+          // Single dispatch: a second .click() would toggle the vote back off.
+          try { nativeVote.click(); } catch (err) {}
+        } else {
+          vTarget = !(ans && ans.voted);
+        }
+
+        // Local UI state (always) — optimistic, in-place, no canvas re-render.
+        let vCountLabel = '';
+        if (ans) {
+          const cur = String(ans.voteCount || '').replace(/[,，\s]/g, '');
+          if (/^\d+$/.test(cur)) {
+            ans.voteCount = String(Math.max(0, parseInt(cur, 10) + (vTarget ? 1 : -1)));
+          }
+          ans.voted = vTarget;
+          if (ans.voteCount !== '' && ans.voteCount != null) vCountLabel = ' ' + ans.voteCount;
+        }
+        voteBtn.classList.toggle('voted', vTarget);
+        voteBtn.textContent = (vTarget ? '✔ 已赞同' : '▲ 赞同') + vCountLabel;
+
+        // Keep formattedCode cache in sync so tab switches don't revert the state.
+        if (ans && activeTab && window.VSZhihuParser) {
+          try {
+            activeTab.formattedCode = window.VSZhihuParser.formatAsTypeScript(parsed);
+          } catch (err) {}
+        }
+
+        // Path C: no verified native card (internal tab / detached parse) → direct API.
+        if (!nativeVote) {
+          if (/^\d{5,25}$/.test(vAnswerId)) {
+            self.voteViaApi(vAnswerId, vTarget ? 'up' : 'neutral')
+              .then(data => {
+                const rc = data && (data.voteup_count != null ? data.voteup_count
+                  : (data.voteupCount != null ? data.voteupCount : null));
+                if (rc != null && ans) {
+                  ans.voteCount = String(rc);
+                  voteBtn.textContent = (vTarget ? '✔ 已赞同' : '▲ 赞同') + ' ' + ans.voteCount;
+                }
+                self.flashStatus('✓ 赞同已提交 (API)');
+              })
+              .catch(err => {
+                self.flashStatus('⚠ 未真正投票: ' + (err && err.message || 'error') + '（仅本地状态）');
+              });
+          } else {
+            self.flashStatus('⚠ 未真正投票: 无回答 ID（仅本地状态）');
+          }
+        }
+        return;
+      }
+
+      // 5. Comment Trigger / Comment Link
       const commentBtn = e.target.closest('.vsc-btn-comment-trigger, .vsc-code-comment-link:not(.vsc-btn-expand-sub)');
       if (commentBtn) {
         e.preventDefault();
