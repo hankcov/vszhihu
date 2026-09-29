@@ -968,17 +968,16 @@ window.VSZhihuParser = {
       code += `<span class="syn-kw">export const</span> <span class="syn-var">${data.type === 'hot' ? 'hotRankStream' : 'feedStream'}</span>: <span class="syn-type">ZhihuStream</span> = [\n`;
 
       data.feedList.forEach((item) => {
-        // Merge counts into author line: "张三(赞 100；评 200)" — omit part when absent.
+        // Counts as trailing comment on author line: author: "张三", // 赞 100；评 200
         const meta = [
           item.voteCount ? `赞 ${item.voteCount}` : '',
           item.commentCount ? `评 ${item.commentCount}` : ''
         ].filter(Boolean).join('；');
-        const authorDisplay = meta ? `${item.author}(${meta})` : item.author;
 
         code += `  {\n`;
         code += `    <span class="syn-var">id</span>: <span class="syn-num">${item.id}</span>,\n`;
         code += `    <span class="syn-var">title</span>: <a href="${item.href}" class="vsc-code-link"><span class="syn-str">"${escapeHtml(item.title).replace(/"/g, '\\"')}"</span></a>,\n`;
-        code += `    <span class="syn-var">author</span>: <span class="syn-str">"${escapeHtml(authorDisplay)}"</span>,\n`;
+        code += `    <span class="syn-var">author</span>: <span class="syn-str">"${escapeHtml(item.author)}"</span>${meta ? `, <span class="syn-cmt">// ${escapeHtml(meta)}</span>` : ','}\n`;
         code += `    <span class="syn-var">url</span>: <a href="${item.href}" class="vsc-code-link"><span class="syn-str">"${escapeHtml(item.href)}"</span></a>,\n`;
         code += `    <span class="syn-var">excerpt</span>: <span class="syn-str">"${escapeHtml(item.excerpt.substring(0, 120).replace(/"/g, '\\"'))}..."</span>\n`;
         code += `  },\n`;
