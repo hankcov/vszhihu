@@ -802,6 +802,22 @@ window.VSZhihuParser = {
       const metricsEl = item.querySelector('.ContentItem-actions, .HotItem-metrics, .ContentItem-meta');
       const metrics = metricsEl ? (metricsEl.innerText || metricsEl.textContent || '').replace(/\s+/g, ' ').trim() : '';
 
+      // Structured counts for author line: "张三(赞 100；评 200)".
+      const voteEl = item.querySelector('.VoteButton-count, .VoteButton--up, .Button--voteUp, [aria-label*="赞同"]');
+      let voteCount = voteEl ? (voteEl.innerText || '').replace(/▲|\n|赞同|，|,/g, '').trim() : '';
+      if (!voteCount && metrics) {
+        voteCount = (metrics.match(/赞同\s*([\d.,]+万?|[Kk]\d*)/) || [])[1] || '';
+      }
+
+      const commentBtn = Array.from(item.querySelectorAll('button, .Button, [role="button"]'))
+        .find(b => (b.innerText || b.textContent || '').includes('评论'));
+      let commentCount = commentBtn ? (((commentBtn.innerText || commentBtn.textContent).match(/\d[\d.,]*万?/) || [])[0] || '') : '';
+      if (!commentCount && metrics) {
+        commentCount = (metrics.match(/评论\s*([\d.,]+万?)/) || [])[1] || '';
+      }
+      voteCount = String(voteCount).replace(/[，,\s]/g, '');
+      commentCount = String(commentCount).replace(/[，,\s]/g, '');
+
       if (!href || seenUrls.has(href)) {
         return;
       }
@@ -813,7 +829,9 @@ window.VSZhihuParser = {
         href: href,
         author: author,
         excerpt: excerpt || title,
-        metrics: metrics
+        metrics: metrics,
+        voteCount: voteCount,
+        commentCount: commentCount
       });
     });
 
@@ -853,7 +871,9 @@ window.VSZhihuParser = {
                   title: title,
                   href: href,
                   author: authorName ? this.cleanAuthorName(authorName) : '知乎用户',
-                  excerpt: (target.excerpt || title).replace(/<[^>]+>/g, '')
+                  excerpt: (target.excerpt || title).replace(/<[^>]+>/g, ''),
+                  voteCount: String(target.voteup_count ?? target.voteupCount ?? '').replace(/[，,\s]/g, ''),
+                  commentCount: String(target.comment_count ?? target.commentCount ?? '').replace(/[，,\s]/g, '')
                 });
               }
             });
@@ -948,10 +968,17 @@ window.VSZhihuParser = {
       code += `<span class="syn-kw">export const</span> <span class="syn-var">${data.type === 'hot' ? 'hotRankStream' : 'feedStream'}</span>: <span class="syn-type">ZhihuStream</span> = [\n`;
 
       data.feedList.forEach((item) => {
+        // Merge counts into author line: "张三(赞 100；评 200)" — omit part when absent.
+        const meta = [
+          item.voteCount ? `赞 ${item.voteCount}` : '',
+          item.commentCount ? `评 ${item.commentCount}` : ''
+        ].filter(Boolean).join('；');
+        const authorDisplay = meta ? `${item.author}(${meta})` : item.author;
+
         code += `  {\n`;
         code += `    <span class="syn-var">id</span>: <span class="syn-num">${item.id}</span>,\n`;
         code += `    <span class="syn-var">title</span>: <a href="${item.href}" class="vsc-code-link"><span class="syn-str">"${escapeHtml(item.title).replace(/"/g, '\\"')}"</span></a>,\n`;
-        code += `    <span class="syn-var">author</span>: <span class="syn-str">"${escapeHtml(item.author)}"</span>,\n`;
+        code += `    <span class="syn-var">author</span>: <span class="syn-str">"${escapeHtml(authorDisplay)}"</span>,\n`;
         code += `    <span class="syn-var">url</span>: <a href="${item.href}" class="vsc-code-link"><span class="syn-str">"${escapeHtml(item.href)}"</span></a>,\n`;
         code += `    <span class="syn-var">excerpt</span>: <span class="syn-str">"${escapeHtml(item.excerpt.substring(0, 120).replace(/"/g, '\\"'))}..."</span>\n`;
         code += `  },\n`;
