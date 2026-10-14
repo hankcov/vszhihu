@@ -91,6 +91,8 @@
       data = window.VSZhihuParser.parseQuestionPage();
     } else if (pageType === 'article') {
       data = window.VSZhihuParser.parseArticlePage();
+    } else if (pageType === 'pin') {
+      data = window.VSZhihuParser.parsePinPage();
     } else if (pageType === 'hot') {
       data = window.VSZhihuParser.parseHotPage();
     } else {

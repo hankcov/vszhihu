@@ -78,6 +78,9 @@ window.VSZhihuParser = {
     if (path.includes('/question/')) {
       return 'question';
     }
+    if (path.includes('/pin/')) {
+      return 'pin';
+    }
     if (path.includes('/p/') || path.includes('/zhuanlan/')) {
       return 'article';
     }
@@ -346,6 +349,128 @@ window.VSZhihuParser = {
         badge: badgeText,
         voteCount: voteCount,
         commentCount: commentCount,
+        contentHtml: contentHtml,
+        contentText: contentText || title,
+        comments: comments
+      }]
+    };
+  },
+
+  /**
+   * Parse Zhihu Pin page (`/pin/{id}`, 知乎想法)
+   */
+  parsePinPage: function(doc = (typeof document !== 'undefined' ? document : null), url = '') {
+    const __perf = window.VSZhihuPerf && window.VSZhihuPerf.mark('parser.parsePinPage');
+    const targetDoc = doc || document;
+
+    const currentUrl = url || (typeof window !== 'undefined' ? window.location.pathname : '');
+    const pathMatch = currentUrl.match(/pin\/(\d{5,25})/);
+    const pinId = pathMatch ? pathMatch[1] : '';
+
+    // DOM first
+    const authorEl = targetDoc.querySelector('.AuthorInfo-name .UserLink-link, .AuthorInfo-name, .Post-Header .UserLink-link, .UserLink-link, a[href*="/people/"]');
+    let authorName = authorEl ? authorEl.innerText.trim() : '';
+    const badgeEl = targetDoc.querySelector('.AuthorInfo-badgeText, .AuthorInfo-detail');
+    let badgeText = badgeEl ? badgeEl.innerText.trim() : '';
+
+    const contentEl = targetDoc.querySelector('[class*="PinItem"] .RichText, .PinPage .RichText, .RichText, .Post-RichTextContainer');
+    let contentHtml = contentEl ? contentEl.innerHTML : '';
+    let contentText = contentEl ? this.cleanContentText(contentEl) : '';
+
+    let voteCount = '0';
+    let commentCount = '0';
+    let createdAt = '';
+
+    // js-initialData fallback / enrichment: initialState.entities.pins[pinId]
+    const initialDataEl = targetDoc.getElementById('js-initialData');
+    if (initialDataEl && initialDataEl.textContent) {
+      try {
+        const json = JSON.parse(initialDataEl.textContent);
+        const pins = json?.initialState?.entities?.pins || {};
+        const pinObj = (pinId && pins[pinId]) || Object.values(pins)[0] || null;
+        if (pinObj) {
+          const items = Array.isArray(pinObj.content) ? pinObj.content : [];
+          // Pin content pieces: "plain title | <p>html</p>" or raw HTML fragments.
+          const pieceToText = (raw) => {
+            const s = String(raw || '');
+            const bar = s.indexOf(' | ');
+            if (bar > -1 && s.charAt(bar + 3) === '<') {
+              return s.substring(0, bar).trim() + '\n\n' + this._htmlToContentText(s.substring(bar + 3));
+            }
+            return this._htmlToContentText(s);
+          };
+          if (!contentText && items.length) {
+            contentText = items.map(it => pieceToText(it.content || it.ownText || '')).filter(Boolean).join('\n\n').trim();
+          }
+          if (!contentHtml && items.length) {
+            contentHtml = items.map(it => String(it.content || '')).join('');
+          }
+          authorName = authorName || pinObj.author?.name || pinObj.author?.member?.name || pinObj.author?.url_token || '';
+          if (pinObj.likeCount != null) voteCount = String(pinObj.likeCount);
+          else if (pinObj.voteup_count != null) voteCount = String(pinObj.voteup_count);
+          if (pinObj.commentCount != null) commentCount = String(pinObj.commentCount);
+          if (pinObj.created) createdAt = this.formatAnswerTime(pinObj.created);
+        }
+      } catch (e) {}
+    }
+
+    let title = targetDoc.title ? targetDoc.title.replace(/\s*[-|–]\s*知乎\s*$/, '').trim() : '';
+    if (!title && contentText) title = contentText.split('\n')[0].substring(0, 60);
+    if (!title) title = '知乎想法';
+
+    let comments = this.extractCommentsFromInitialData(targetDoc);
+
+    if (comments.length === 0) {
+      const commentNodes = Array.from(targetDoc.querySelectorAll('.NestComment, .CommentItemV2, .CommentItem, [class*="CommentItem"], [class*="NestComment"]'));
+      const topComments = commentNodes.filter(node => !node.parentElement || !node.parentElement.closest('.NestComment, .CommentItemV2, .CommentItem, [class*="NestComment"], [class*="CommentItem"], [class*="replyList"]'));
+
+      topComments.forEach((cNode, cIdx) => {
+        const cAuthorEl = cNode.querySelector('.UserLink-link, .CommentItem-author, .CommentItemV2-author, a[href*="/people/"], [class*="UserLink"]');
+        const cAuthor = cAuthorEl ? cAuthorEl.innerText.trim() : '知乎用户';
+        const cTextEl = cNode.querySelector('.CommentItem-content, .CommentItemV2-content, .CommentItem-text, .RichText, [class*="content"]');
+        const cText = cTextEl ? cTextEl.innerText.trim() : '';
+        const cLikeEl = cNode.querySelector('.Button--like, .CommentItem-likeCount, [class*="like"]');
+        const cLikes = cLikeEl ? cLikeEl.innerText.replace(/[^\d]/g, '').trim() || '0' : '0';
+
+        const replyNodes = cNode.querySelectorAll('.NestComment-children [class*="CommentItem"], .CommentItem-reply, [class*="replyList"] [class*="CommentItem"]');
+        const replies = [];
+        replyNodes.forEach((rNode, rIdx) => {
+          const rAuthorEl = rNode.querySelector('.UserLink-link, .CommentItem-author, .CommentItemV2-author, a[href*="/people/"]');
+          const rAuthor = rAuthorEl ? rAuthorEl.innerText.trim() : '回复者';
+          const rTextEl = rNode.querySelector('.CommentItem-content, .CommentItemV2-content, .RichText');
+          const rText = rTextEl ? rTextEl.innerText.trim() : '';
+          const rLikeEl = rNode.querySelector('.Button--like, [class*="like"]');
+          const rLikes = rLikeEl ? rLikeEl.innerText.replace(/[^\d]/g, '').trim() || '0' : '0';
+          if (rText && rText !== cText) {
+            replies.push({ id: `p_${cIdx + 1}_sub_${rIdx + 1}`, author: rAuthor, text: rText, likes: rLikes });
+          }
+        });
+
+        if (cText) {
+          comments.push({ id: `p_${cIdx + 1}`, author: cAuthor, text: cText, likes: cLikes, replies: replies });
+        }
+      });
+    }
+
+    if (comments.length > 0 && commentCount === '0') {
+      commentCount = String(comments.length);
+    }
+
+    if (window.VSZhihuPerf && __perf) {
+      window.VSZhihuPerf.end(__perf, 'pinId=' + pinId + ' bodyLen=' + String(contentText || '').length + ' comments=' + comments.length);
+    }
+
+    return {
+      type: 'pin',
+      title: title,
+      answers: [{
+        id: 1,
+        answerId: pinId,
+        author: authorName || '知乎用户',
+        badge: badgeText,
+        voteCount: voteCount,
+        commentCount: commentCount,
+        createdAt: createdAt,
         contentHtml: contentHtml,
         contentText: contentText || title,
         comments: comments
@@ -856,6 +981,7 @@ window.VSZhihuParser = {
               if (target.id && !href) {
                 if (target.type === 'answer' || target.question) href = `https://www.zhihu.com/question/${target.question?.id || '0'}/answer/${target.id}`;
                 else if (target.type === 'article') href = `https://zhuanlan.zhihu.com/p/${target.id}`;
+                else if (target.type === 'pin') href = `https://www.zhihu.com/pin/${target.id}`;
               }
               if (title && href && !seenUrls.has(href)) {
                 seenUrls.add(href);
@@ -920,6 +1046,8 @@ window.VSZhihuParser = {
       data = this.parseQuestionPage(doc, url);
     } else if (pageType === 'article') {
       data = this.parseArticlePage(doc, url);
+    } else if (pageType === 'pin') {
+      data = this.parsePinPage(doc, url);
     } else if (pageType === 'hot') {
       data = this.parseHotPage(doc);
     } else {
@@ -938,6 +1066,10 @@ window.VSZhihuParser = {
     if (type === 'question' || targetUrl.includes('/question/')) {
       const qid = parsedData?.questionId || targetUrl.match(/question\/(\d+)/)?.[1] || 'doc';
       return `question_${qid}.ts`;
+    }
+    if (type === 'pin' || targetUrl.includes('/pin/')) {
+      const pid = targetUrl.match(/pin\/(\d+)/)?.[1] || 'doc';
+      return `pin_${pid}.ts`;
     }
     if (type === 'article' || targetUrl.includes('/p/')) {
       const pid = parsedData?.articleId || targetUrl.match(/p\/(\d+)/)?.[1] || 'doc';
@@ -987,37 +1119,48 @@ window.VSZhihuParser = {
       return code;
     }
 
-    // Question format
-    let code = `<span class="syn-kw">import</span> { <span class="syn-type">Question</span>, <span class="syn-type">Answer</span>, <span class="syn-type">User</span> } <span class="syn-kw">from</span> <span class="syn-str">'@zhihu/core'</span>;\n\n`;
-    code += `<span class="syn-cmt">/**\n * QUESTION: ${escapeHtml(data.title)}\n`;
-    if (data.detail) {
-      String(data.detail).split(/\r?\n/).forEach(dl => {
-        const t = dl.trim();
-        const im = t.match(/^\[\[img:(https?:\/\/[^\]]+)\]\]$/);
-        if (im) { code += ` * 📷 图片(${escapeHtml(shortImgLabel(im[1]))})\n`; return; }
-        const cm = t.match(/^\[\[cap:([\s\S]*?)\]\]$/);
-        if (cm) { code += ` * 图注: ${escapeHtml(cm[1].trim())}\n`; return; }
-        code += (t ? ` * ${escapeHtml(t)}` : ' * ') + '\n';
-      });
-    }
-    code += ` */</span>\n\n`;
+    // Question format (type === 'pin' renders as a Pin doc instead)
+    const isPin = data.type === 'pin';
+    let code = isPin
+      ? `<span class="syn-kw">import</span> { <span class="syn-type">Pin</span> } <span class="syn-kw">from</span> <span class="syn-str">'@zhihu/core'</span>;\n\n`
+      : `<span class="syn-kw">import</span> { <span class="syn-type">Question</span>, <span class="syn-type">Answer</span>, <span class="syn-type">User</span> } <span class="syn-kw">from</span> <span class="syn-str">'@zhihu/core'</span>;\n\n`;
+    if (isPin) {
+      code += `<span class="syn-cmt">/**\n * PIN: ${escapeHtml(data.title)}\n */</span>\n\n`;
+    } else {
+      code += `<span class="syn-cmt">/**\n * QUESTION: ${escapeHtml(data.title)}\n`;
+      if (data.detail) {
+        String(data.detail).split(/\r?\n/).forEach(dl => {
+          const t = dl.trim();
+          const im = t.match(/^\[\[img:(https?:\/\/[^\]]+)\]\]$/);
+          if (im) { code += ` * 📷 图片(${escapeHtml(shortImgLabel(im[1]))})\n`; return; }
+          const cm = t.match(/^\[\[cap:([\s\S]*?)\]\]$/);
+          if (cm) { code += ` * 图注: ${escapeHtml(cm[1].trim())}\n`; return; }
+          code += (t ? ` * ${escapeHtml(t)}` : ' * ') + '\n';
+        });
+      }
+      code += ` */</span>\n\n`;
 
-    code += `<span class="syn-kw">export interface</span> <span class="syn-type">TargetQuestion</span> <span class="syn-kw">extends</span> <span class="syn-type">Question</span> {\n`;
-    code += `  <span class="syn-var">title</span>: <span class="syn-str">"${escapeHtml(data.title).replace(/"/g, '\\"')}"</span>;\n`;
-    code += `  <span class="syn-var">totalAnswers</span>: <span class="syn-num">${data.answers.length}</span>;\n`;
-    code += `}\n\n`;
+      code += `<span class="syn-kw">export interface</span> <span class="syn-type">TargetQuestion</span> <span class="syn-kw">extends</span> <span class="syn-type">Question</span> {\n`;
+      code += `  <span class="syn-var">title</span>: <span class="syn-str">"${escapeHtml(data.title).replace(/"/g, '\\"')}"</span>;\n`;
+      code += `  <span class="syn-var">totalAnswers</span>: <span class="syn-num">${data.answers.length}</span>;\n`;
+      code += `}\n\n`;
+    }
 
     data.answers.forEach((ans, idx) => {
       code += `<span class="vsc-answer-card" id="ans-${ans.id}">\n`;
       code += `<span class="syn-cmt">/**\n`;
-      code += ` * ANSWER #${idx + 1} by @${escapeHtml(ans.author)} ${ans.badge ? '(' + escapeHtml(ans.badge) + ')' : ''}\n`;
+      code += isPin
+        ? ` * PIN ${escapeHtml(String(ans.answerId || idx + 1))} by @${escapeHtml(ans.author)} ${ans.badge ? '(' + escapeHtml(ans.badge) + ')' : ''}\n`
+        : ` * ANSWER #${idx + 1} by @${escapeHtml(ans.author)} ${ans.badge ? '(' + escapeHtml(ans.badge) + ')' : ''}\n`;
       code += ` * Votes: ▲ ${ans.voteCount} | Comments: 💬 ${ans.commentCount}`;
       if (ans.createdAt) {
         code += ` | Time: ${escapeHtml(ans.createdAt)}`;
       }
       code += `\n`;
       code += ` */</span>\n`;
-      code += `<span class="syn-kw">export const</span> <span class="syn-var">answer_${idx + 1}</span>: <span class="syn-type">Answer</span> = {\n`;
+      code += isPin
+        ? `<span class="syn-kw">export const</span> <span class="syn-var">pin</span>: <span class="syn-type">Pin</span> = {\n`
+        : `<span class="syn-kw">export const</span> <span class="syn-var">answer_${idx + 1}</span>: <span class="syn-type">Answer</span> = {\n`;
       code += `  <span class="syn-var">author</span>: <span class="syn-str">"${escapeHtml(ans.author)}"</span>,\n`;
       code += `  <span class="syn-var">voteCount</span>: <span class="syn-num">${ans.voteCount.replace(/,/g, '')}</span>,\n`;
       if (ans.createdAt) {
@@ -1088,7 +1231,9 @@ window.VSZhihuParser = {
 
       code += `};\n`;
       code += `<div class="vsc-action-bar">\n`;
-      code += `  <button class="vsc-btn-action vsc-btn-vote-trigger${ans.voted ? ' voted' : ''}" data-answer-idx="${idx}" data-answer-id="${ans.answerId}">${ans.voted ? '✔ 已赞同' : '▲ 赞同'} ${escapeHtml(ans.voteCount)}</button>\n`;
+      if (!isPin) {
+        code += `  <button class="vsc-btn-action vsc-btn-vote-trigger${ans.voted ? ' voted' : ''}" data-answer-idx="${idx}" data-answer-id="${ans.answerId}">${ans.voted ? '✔ 已赞同' : '▲ 赞同'} ${escapeHtml(ans.voteCount)}</button>\n`;
+      }
       code += `  <button class="vsc-btn-action vsc-btn-comment-trigger" data-answer-idx="${idx}" data-answer-id="${ans.answerId}">💬 ${ans.commentCount} 评论/回复区</button>\n`;
       if (data.isSingleAnswer && data.questionUrl) {
         code += `  <a href="${data.questionUrl}" class="vsc-btn-action vsc-btn-view-all" data-question-url="${data.questionUrl}">📖 ${escapeHtml(data.viewAllText || '查看全部回答')}</a>\n`;

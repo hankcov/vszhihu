@@ -77,6 +77,12 @@ window.VSZhihuUI = {
         `https://www.zhihu.com/api/v4/comment_v5/posts/${targetId}/root_comments?limit=20&offset=${offset}&order=normal`,
         `https://www.zhihu.com/api/v4/articles/${targetId}/root_comments?limit=20&offset=${offset}&order=normal`
       ];
+    } else if (category === 'pins') {
+      urls = [
+        `https://www.zhihu.com/api/v4/comment_v5/pins/${targetId}/root_comments?limit=20&offset=${offset}&order=normal`,
+        `https://www.zhihu.com/api/v4/pins/${targetId}/comments?limit=20&offset=${offset}`,
+        `https://www.zhihu.com/api/v4/comments/pins/${targetId}/root_comments?limit=20&offset=${offset}&order=normal`
+      ];
     } else {
       urls = [
         `https://www.zhihu.com/api/v4/comment_v5/answers/${targetId}/root_comments?limit=20&offset=${offset}&order=normal`,
@@ -658,6 +664,9 @@ window.VSZhihuUI = {
     if (fullUrl.includes('/question/')) {
       const qid = fullUrl.match(/question\/(\d+)/)?.[1];
       title = `question_${qid || 'doc'}.ts`;
+    } else if (fullUrl.includes('/pin/')) {
+      const pid = fullUrl.match(/pin\/(\d+)/)?.[1];
+      title = `pin_${pid || 'doc'}.ts`;
     } else if (fullUrl.includes('/p/')) {
       const pid = fullUrl.match(/p\/(\d+)/)?.[1];
       title = `article_${pid || 'doc'}.ts`;
@@ -1672,9 +1681,10 @@ window.VSZhihuUI = {
     const targetAnswerId = answerId || targetAns?.answerId || '';
     const authorName = targetAns?.author || '知乎用户';
 
-    const isArticle = this.parsedData?.type === 'article' || window.location.pathname.includes('/p/');
-    const apiCategory = isArticle ? 'articles' : 'answers';
-    const statusCategory = isArticle ? 'article' : 'answer';
+    const isPin = this.parsedData?.type === 'pin' || window.location.pathname.includes('/pin/');
+    const isArticle = !isPin && (this.parsedData?.type === 'article' || window.location.pathname.includes('/p/'));
+    const apiCategory = isPin ? 'pins' : (isArticle ? 'articles' : 'answers');
+    const statusCategory = isPin ? 'pin' : (isArticle ? 'article' : 'answer');
 
     // Prefer preserved HTML from full rebuild (same target).
     const canRestore = preserved &&
@@ -1687,7 +1697,7 @@ window.VSZhihuUI = {
           <span class="vsc-panel-tab">PROBLEMS 0</span>
           <span class="vsc-panel-tab">OUTPUT</span>
           <span class="vsc-panel-tab">TERMINAL</span>
-          <span class="vsc-panel-tab active">COMMENTS (${isArticle ? 'Article' : 'Answer'} #${answerIdx + 1} - @${authorName})</span>
+          <span class="vsc-panel-tab active">COMMENTS (${isPin ? 'Pin' : isArticle ? 'Article' : 'Answer'} #${answerIdx + 1} - @${authorName})</span>
         </div>
         <div class="vsc-panel-actions">
           <span id="vsc-panel-clear" title="Clear Console">⊘</span>
